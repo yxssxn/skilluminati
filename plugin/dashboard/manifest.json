@@ -1,0 +1,7 @@
+{
+  "name": "skilluminati",
+  "label": "Skilluminati",
+  "version": "0.1.0",
+  "description": "Read-only verdicts feed for the Skilluminati desktop page.",
+  "api": "plugin_api.py"
+}

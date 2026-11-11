@@ -1,0 +1,13 @@
+manifest_version: 2
+name: skilluminati
+version: "0.1.0"
+description: "Is a skill still pulling its weight? Replays its latest uses with it and without it, and the Owl, judging blind, gives the verdict: Enlightened, Dead weight, Hindrance or Unproven."
+author: "yxssxn"
+license: MIT
+requires_hermes: ">=0.23.0"
+provides_tools:
+  - skilluminati_estimate
+  - skilluminati_result
+capabilities:
+  - llm.provider_override
+  - llm.model_override
