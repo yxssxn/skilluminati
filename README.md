@@ -5,7 +5,8 @@
 **Your skills, judged blind.**
 Find out whether each skill your Hermes agent loads makes its answers better.
 
-> "The owl of Minerva spreads its wings only with the falling of the dusk." (G.W.F. Hegel)
+> "The owl of Minerva spreads its wings only with the falling of the dusk." 
+(G.W.F. Hegel)
 
 ## What it answers
 
