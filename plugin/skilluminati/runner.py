@@ -470,7 +470,7 @@ def summarise_aa(cell: str, model: str, pairs: list[dict[str, Any]]) -> dict[str
     def d(a: stats.AANoise) -> dict[str, Any]:
         return {"n": a.n, "wins": a.wins, "losses": a.losses, "ties": a.ties, "n_decisive": a.n_decisive,
                 "rate": a.rate, "low": round(a.low, 4), "high": round(a.high, 4), "tie_share": a.tie_share,
-                "noisy": a.noisy, "verdict": stats.verdict(a.wins, a.losses, a.ties).verdict}
+                "firm": a.n_decisive, "verdict": stats.verdict(a.wins, a.losses, a.ties).verdict}
     return {
         "cell": cell, "model": model, "n_pairs": len(pairs), "n_errors": len(pairs) - len(ok),
         "scripted": {"a_pass": sum(1 for p in ok if p["scripted"]["without_a"]["pass"]),

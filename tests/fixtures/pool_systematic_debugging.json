@@ -1,0 +1,164 @@
+{
+ "note": "Outcomes only, derived from the three finished systematic-debugging verdict runs of 12 Nov 2026 (result.json per_skill pairs: task_hash and outcome). No task text, answers, names or paths.",
+ "runs": [
+  {
+   "run": "run1",
+   "pairs": [
+    {
+     "task_hash": "69300e52c06d",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "7a7a0632ab2e",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "433fac79ff08",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "d019ce089fea",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "e5c191a0c30c",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "f71a4f6dfa16",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "74b31a739f29",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "009e85ffd1da",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "839d3ed17519",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "b8644a321e8e",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "5fd3bc6bee20",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "2754d0758e13",
+     "outcome": "win"
+    }
+   ]
+  },
+  {
+   "run": "run2",
+   "pairs": [
+    {
+     "task_hash": "69300e52c06d",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "7a7a0632ab2e",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "433fac79ff08",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "d019ce089fea",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "e5c191a0c30c",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "f71a4f6dfa16",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "74b31a739f29",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "009e85ffd1da",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "839d3ed17519",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "b8644a321e8e",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "5fd3bc6bee20",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "2754d0758e13",
+     "outcome": "tie"
+    }
+   ]
+  },
+  {
+   "run": "run3",
+   "pairs": [
+    {
+     "task_hash": "69300e52c06d",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "7a7a0632ab2e",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "433fac79ff08",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "d019ce089fea",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "e5c191a0c30c",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "f71a4f6dfa16",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "74b31a739f29",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "009e85ffd1da",
+     "outcome": "tie"
+    },
+    {
+     "task_hash": "839d3ed17519",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "b8644a321e8e",
+     "outcome": "loss"
+    },
+    {
+     "task_hash": "5fd3bc6bee20",
+     "outcome": "win"
+    },
+    {
+     "task_hash": "2754d0758e13",
+     "outcome": "win"
+    }
+   ]
+  }
+ ]
+}

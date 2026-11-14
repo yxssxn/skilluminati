@@ -48,6 +48,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from . import copy as sb_copy
 from . import llm as sb_llm
+from . import noise as sb_noise
 from . import paths as sb_paths
 from . import verdict as sb_verdict
 
@@ -121,18 +122,70 @@ def max_calls(ctx: Any) -> int:
     return max(1, n)
 
 
+def _read_config() -> Optional[Mapping[str, Any]]:
+    """config.yaml, read-only, via the public ``hermes_cli.config``. None when it cannot be read."""
+    try:
+        from hermes_cli.config import load_config_readonly  # public plugin surface
+        cfg = load_config_readonly()
+    except Exception:
+        return None
+    return cfg if isinstance(cfg, Mapping) else None
+
+
 def active_model_id() -> Optional[str]:
     """The model id an unpinned ``ctx.llm`` call from a slash command runs on: ``model.default`` in
     config.yaml (read-only, via the public ``hermes_cli.config``). The host falls back to this same
     field when no turn has bound a live model, which is the case on the command's worker thread.
     None when it cannot be read. The result line still names the model that actually answered."""
-    try:
-        from hermes_cli.config import load_config_readonly  # public plugin surface
-        model_cfg = (load_config_readonly() or {}).get("model")
-    except Exception:
-        return None
+    model_cfg = (_read_config() or {}).get("model")
     value = model_cfg if isinstance(model_cfg, str) else (model_cfg or {}).get("default") if isinstance(model_cfg, dict) else None
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+PLUGIN_ID = "skilluminati"
+
+
+def _subject_setting(field: str) -> Optional[str]:
+    """The plugin's ``subject.<field>`` setting, read as Hermes reads plugin settings (nested under
+    ``plugins.entries.skilluminati.settings``, then the legacy ``config`` subtree). None when unset."""
+    cfg = _read_config() or {}
+    plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), Mapping) else {}
+    entries = plugins.get("entries") if isinstance(plugins.get("entries"), Mapping) else {}
+    entry = entries.get(PLUGIN_ID) if isinstance(entries.get(PLUGIN_ID), Mapping) else {}
+    for tree in ("settings", "config"):
+        node: Any = entry.get(tree)
+        for seg in ("subject", field):
+            node = node.get(seg) if isinstance(node, Mapping) else None
+        if isinstance(node, str) and node.strip():
+            return node.strip()
+    return None
+
+
+def subject_model_setting() -> Optional[str]:
+    """The plugin's ``subject.model`` setting (see ``_subject_setting``). None when unset."""
+    return _subject_setting("model")
+
+
+def active_provider_id() -> Optional[str]:
+    """``model.provider`` in config.yaml (the provider the active default model belongs to), or None."""
+    model_cfg = (_read_config() or {}).get("model")
+    value = model_cfg.get("provider") if isinstance(model_cfg, Mapping) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def tested_model_id() -> Optional[str]:
+    """The model a new test would run on now (S2): the ``subject.model`` setting when set (tests run
+    on the subject route), else the active default. W2 4: with only ``subject.provider`` set, tests
+    run on that provider's own default model, which cannot be read here, so the answer is None
+    (unknown: no Stale flag) unless that provider is the active one. ``judge.provider`` does not
+    change the tested model. None when nothing can be read."""
+    model = subject_model_setting()
+    if model:
+        return model
+    provider = _subject_setting("provider")
+    if provider and provider.lower() != (active_provider_id() or "").lower():
+        return None
+    return active_model_id()
 
 
 def plural(n: int, word: str) -> str:
@@ -361,10 +414,8 @@ def write_live(guard: sb_llm.CommandGuard, ready_text: str, info: dict[str, Any]
     data = {**info, "line": live_line(guard, ready_text), "updated": time.time(),
             "done": guard.used // per if guard.cap else None, "total": guard.cap // per if guard.cap else None}
     try:
-        path = sb_paths.data_dir() / LIVE_FILE
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(tmp, path)
+        from . import evidence as sb_evidence
+        sb_evidence._write_atomic(sb_paths.data_dir() / LIVE_FILE, data)  # unique temp file, then replace
     except Exception:
         logger.debug("skilluminati: live.json not written", exc_info=True)
 
@@ -518,16 +569,20 @@ def result_line(run_dir: Path, skill: str) -> Optional[str]:
     """'unslop: Dead weight (Plausible). Better 5 · Same 5 · Worse 2.', or None."""
     try:
         result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-        summary = result["per_skill"][skill]
+        from . import evidence as sb_evidence
+        summary = sb_evidence.effective(result["per_skill"][skill])  # F01: the pooled verdict when there is one
         c = summary["combined"]
         wins, losses, ties = int(c["wins"]), int(c["losses"]), int(c["ties"])
         lean = summary.get("lean") or sb_verdict.lean(wins, losses, ties)
+        tools = summary.get("tools") if isinstance(summary.get("tools"), dict) else {}
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    word = sb_copy.WORDS.get(lean.get("verdict"), sb_copy.WORDS["not_enough"])
-    strength = sb_copy.STRENGTH.get(lean.get("strength"))
+    word, _, strength = sb_copy.shown(lean.get("verdict"), lean.get("strength"))  # no Dead weight on a lean
     line = sb_copy.CHAT_RESULT_LINE if strength else sb_copy.CHAT_RESULT_LINE_NO_STRENGTH
-    return line.format(skill=skill, verdict=word, strength=strength, w=wins, t=ties, l=losses)
+    text = line.format(skill=skill, verdict=word, strength=strength, w=wins, t=ties, l=losses)
+    pooled = sb_evidence.pool_line(summary.get("pool_tasks"), summary.get("pool_runs"))
+    text = f"{text} {pooled}." if pooled else text
+    return f"{text} {sb_copy.FLAG_TOOL_DRIVEN}" if tools.get("flag") is True else text
 
 
 # ── selftest ─────────────────────────────────────────────────────────────────
@@ -588,7 +643,8 @@ def run_selftest(ctx: Any, args: list[str], *, session_id: str = "") -> str:
         result = test.run()
         stamp_selftest_models(result, test.caller.calls, guard)
         agg = st.aggregate({pl["run"]: result}, fixtures_dir=sb_paths.FIXTURES_DIR)
-        (out_dir / "result.json").write_text(json.dumps({"run": result, "aggregate": agg}, indent=2, default=str) + "\n",
+        (out_dir / "result.json").write_text(json.dumps({"run": result, "aggregate": agg, **sb_paths.version_stamp()},
+                                                        indent=2, default=str) + "\n",
                                             encoding="utf-8")
         return out_dir
 
@@ -734,7 +790,8 @@ def verdict_plan(ctx: Any, skill: str, source: str = "auto") -> dict[str, Any]:
     names = sb_redact.load_names(sb_paths.names_path())
     return {"skill": skill, "tasks": tasks, "counts": counts, "n_aa": n_aa, "total": total, "source": used,
             "unused": max(0, available - len(tasks)),
-            "min": commands.min_tasks(), "cap": max_calls(ctx), "routes": routes(ctx),
+            # F04: the start gate is the lean rule's own minimum, so a run never pays for a sure Unproven.
+            "min": max(commands.min_tasks(), sb_verdict.MIN_TESTS), "cap": max_calls(ctx), "routes": routes(ctx),
             "names_loaded": len(names), "tokens": verdict_tokens(tasks, n_aa, skill_chars(skill)),
             "minutes": minutes_estimate(total, "verdict", VERDICT_WORKERS, limits.get("seconds_per_call")),
             "limits": limits, "active_model": active_model_id()}
@@ -748,9 +805,11 @@ def answer_limits(skill: str) -> dict[str, Any]:
 
 def plan_line(pl: Mapping[str, Any]) -> str:
     """The popup line once the plan is known: how many uses were found, how many get tested, how long."""
-    if pl.get("source") == "pack":
-        return sb_copy.PACK_PLAN_LINE.format(skill=pl["skill"], n=len(pl["tasks"]), minutes=pl["minutes"])
-    return sb_copy.PLAN_LINE.format(skill=pl["skill"], n=len(pl["tasks"]), minutes=pl["minutes"])
+    tpl = sb_copy.PACK_PLAN_LINE if pl.get("source") == "pack" else sb_copy.PLAN_LINE
+    line = tpl.format(skill=pl["skill"], n=len(pl["tasks"]), minutes=pl["minutes"])
+    if isinstance(pl.get("names_loaded"), int):  # SEC-S3: say plainly when no names are removed
+        line += " " + sb_copy.PLAN_NAMES.format(names=plural(pl["names_loaded"], "name"))
+    return line
 
 
 def not_enough_text(pl: Mapping[str, Any]) -> str:
@@ -788,14 +847,33 @@ def start(ctx: Any, skill: str, source: str = "auto", *, session_id: str = "", b
                   session_id=session_id, kind="verdict", skill=skill, background=background)
 
 
+# Task text fields that come from your chats. The run folder keeps them only after the same
+# redact pass the model's copy goes through (SEC-M1); the raw text stays in memory for the run.
+TASK_TEXT_FIELDS = ("system_prompt", "user_turn", "request")
+
+
+def stored_task(task: Mapping[str, Any], names: list[str]) -> dict[str, Any]:
+    """The copy of one mined task written to the run folder: chat text redacted, hashes and ids kept."""
+    from . import realrun, redact as sb_redact
+    out = dict(task)
+    for k in TASK_TEXT_FIELDS:
+        if isinstance(out.get(k), str):
+            out[k] = sb_redact.redact(out[k], names=names)[0]
+    if isinstance(out.get("frozen_messages"), list):
+        out["frozen_messages"] = realrun.redact_messages(out["frozen_messages"], names)[0]
+    return out
+
+
 def _verdict_work(pl: Mapping[str, Any], skill: str, guard: sb_llm.CommandGuard) -> Path:
     from . import realrun
     out_dir = sb_paths.new_run_dir(f"verdict-{skill}", _stamp())
     strict_path = sb_paths.private_file(out_dir / "tasks.jsonl")
     frozen_path = sb_paths.private_file(out_dir / "tasks_frozen.jsonl")
+    from . import redact as sb_redact
+    names = sb_redact.load_names(sb_paths.names_path())
     with strict_path.open("w", encoding="utf-8") as fs, frozen_path.open("w", encoding="utf-8") as ff:
         for t in pl["tasks"]:
-            (ff if t.get("frozen_messages") else fs).write(json.dumps(t, ensure_ascii=False) + "\n")
+            (ff if t.get("frozen_messages") else fs).write(json.dumps(stored_task(t, names), ensure_ascii=False) + "\n")
     from . import mine, packs
     r = pl["routes"]
     # A built-in question set brings its own copy of the skill; a history run uses your installed one.
@@ -819,9 +897,23 @@ def _verdict_work(pl: Mapping[str, Any], skill: str, guard: sb_llm.CommandGuard)
         summary["unused_tasks"] = pl.get("unused")
         summary["run"] = out_dir.name
         summary["counts"] = results["counts"]
-        store_verdict(summary, model=model, judge=results.get("judge_model") or r["job"]["model"] or guard.active_model,
+        judge = results.get("judge_model") or r["job"]["model"] or guard.active_model
+        unread = mark_judge_unread(summary)  # gate 2: shown in result.json, chat and page
+        if not results.get("stopped_early") and not unread:  # F01: a finished run adds its pairs to the pool
+            from . import evidence as sb_evidence
+            try:
+                pool = sb_evidence.pool_summary(summary, model=model, judge=judge, run=out_dir.name)
+            except Exception:
+                logger.exception("skilluminati: pool not updated")
+                pool = None
+            if pool:
+                summary["pool"] = pool
+                summary = dict(sb_evidence.effective(summary))
+                results["per_skill"][skill]["pool"] = pool
+        store_verdict(summary, model=model, judge=judge,
                       aa=results.get("aa"), partial=bool(results.get("stopped_early")),
                       source=sb_copy.SOURCE_PACK if pl.get("source") == "pack" else sb_copy.SOURCE_HISTORY)
+    results.update(sb_paths.version_stamp())  # W2 1: which build made this result
     (out_dir / "result.json").write_text(json.dumps(results, indent=2, default=str) + "\n", encoding="utf-8")
     return out_dir
 
@@ -856,29 +948,62 @@ def last_command(args: list[str]) -> str:
 # ── verdicts.json (the Desktop page reads it) ────────────────────────────────
 
 STORED_KEYS = ("skill", "verdict", "effect", "user_label", "model", "judge", "date", "wins", "losses", "ties",
-               "low", "high", "tasks_to_settle", "heavy", "recommendation", "source", "test_type", "run", "counts")
+               "low", "high", "tasks_to_settle", "heavy", "recommendation", "source", "test_type", "run", "counts",
+               "skill_sha256", "pool_tasks", "pool_runs")
 
 
-#: A/A fields the page shows (the backend serves only these; see dashboard AA_KEYS).
-AA_STORED_KEYS = ("model", "wins", "losses", "ties", "low", "high", "noisy", "date")
+#: A/A fields the page shows (the backend serves only these; see dashboard AA_KEYS). wins/losses/ties/
+#: low/high are the latest run's; firm/pooled are the pooled same-vs-same figure (F11, ``noise.py``).
+AA_STORED_KEYS = ("model", "judge", "wins", "losses", "ties", "low", "high", "firm", "pooled", "date")
 
 
-def aa_row(aa: Any, *, model: str, date: Optional[str]) -> Optional[dict[str, Any]]:
-    """The noise-check row for the page, or None when the run had no A/A pairs."""
+def aa_row(aa: Any, *, model: str, date: Optional[str], judge: Optional[str] = None,
+           pooled: Optional[Mapping[str, Any]] = None) -> Optional[dict[str, Any]]:
+    """The noise-check row for the page, or None when the run had no A/A pairs. ``pooled`` is the
+    figure from ``noise.add_run``; without it the row carries this run's own firm picks."""
     if not isinstance(aa, Mapping) or not isinstance(aa.get("wins"), int):
         return None
     row = {k: aa.get(k) for k in AA_STORED_KEYS}
     row["model"] = aa.get("model") or model
+    row["judge"] = judge
+    fig = pooled if pooled is not None else sb_noise.of_aa(aa)
+    row["firm"], row["pooled"] = (fig["firm"], fig["n"]) if fig else (None, None)
     row["date"] = date
     return row
 
 
 def _is_partial_row(row: Any) -> bool:
     flags = ((row.get("recommendation") or {}).get("flags") or []) if isinstance(row, Mapping) else []
-    return any(isinstance(f, Mapping) and f.get("key") == FLAG_PARTIAL_KEY for f in flags)
+    return any(isinstance(f, Mapping) and f.get("key") in (FLAG_PARTIAL_KEY, FLAG_UNREAD_KEY) for f in flags)
 
 
 FLAG_PARTIAL_KEY = "partial"
+FLAG_UNREAD_KEY = "judge_unread"
+
+
+def judge_mostly_unread(summary: Mapping[str, Any]) -> Optional[tuple[int, int]]:
+    """``(unread, total)`` when the judge read fewer than half of the run's pairs, else None. Such a
+    run says nothing about the skill, so it is stored like a partial run: it never replaces a
+    finished verdict and carries a "Judge failed" flag."""
+    total, unread = summary.get("n_tasks"), summary.get("n_unread")
+    if not (isinstance(total, int) and isinstance(unread, int)) or total <= 0:
+        return None
+    return (unread, total) if unread * 2 > total else None
+
+
+def mark_judge_unread(summary: dict[str, Any]) -> bool:
+    """Put the "Judge failed" flag and the "check the judge" step on a run summary whose judge read
+    fewer than half the pairs (so ``result.json``, the chat report and the page all show it). True
+    when marked. Idempotent."""
+    unread = judge_mostly_unread(summary)
+    rec = summary.get("recommendation")
+    if not unread or not isinstance(rec, dict):
+        return bool(unread)
+    flags = rec.setdefault("flags", [])
+    if not any(isinstance(f, Mapping) and f.get("key") == FLAG_UNREAD_KEY for f in flags):
+        flags.append({"key": FLAG_UNREAD_KEY, "text": sb_copy.FLAG_UNREAD.format(n=unread[0], total=unread[1])})
+    rec["next_step"] = {"key": "check_judge", "text": sb_copy.NEXT_CHECK_JUDGE, "n": None}
+    return True
 
 
 def _settle_wording(row: dict[str, Any], unused: Any) -> None:
@@ -898,9 +1023,19 @@ def store_verdict(summary: Mapping[str, Any], *, model: str, judge: Optional[str
     run's A/A noise check (one row per model: the latest).
 
     A run that stopped early never replaces a verdict from a finished run; with none stored yet it
-    is stored and flagged "Partial: the run stopped early"."""
+    is stored and flagged "Partial: the run stopped early".
+
+    The read-modify-write holds the pool lock on ``verdicts.json`` and writes through a unique temp
+    file (``evidence._pool_lock``, ``evidence._write_atomic``), so two runs at once never lose a row."""
+    from . import evidence as sb_evidence
     path = sb_paths.verdicts_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    with sb_evidence._pool_lock(path):
+        return _store_locked(path, summary, model=model, judge=judge, aa=aa, partial=partial, source=source)
+
+
+def _store_locked(path: Path, summary: Mapping[str, Any], *, model: str, judge: Optional[str], aa: Any,
+                  partial: bool, source: str) -> Path:
+    from . import evidence as sb_evidence
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, ValueError):
@@ -915,9 +1050,19 @@ def store_verdict(summary: Mapping[str, Any], *, model: str, judge: Optional[str
            "heavy": summary.get("heavy"), "recommendation": summary.get("recommendation"),
            "source": source, "test_type": summary["stamp"].get("test_type"),
            "run": summary.get("run"), "counts": summary.get("counts")}
+    row["skill_sha256"] = summary.get("skill_sha256")  # F03: the SKILL.md this verdict tested
+    row["pool_tasks"], row["pool_runs"] = summary.get("pool_tasks"), summary.get("pool_runs")  # F01
     row = {k: row.get(k) for k in STORED_KEYS}
     row["recommendation"] = json.loads(json.dumps(row["recommendation"])) if isinstance(row["recommendation"], dict) else None
     _settle_wording(row, summary.get("unused_tasks"))
+    unread = judge_mostly_unread(summary)
+    if unread and not partial:
+        same = [x for x in data["runs"] if isinstance(x, dict) and x.get("skill") == row["skill"] and x.get("model") == model]
+        if any(not _is_partial_row(x) for x in same):
+            return path  # a judge that read almost nothing never replaces a real verdict
+        if isinstance(row["recommendation"], dict):
+            mark_judge_unread({**summary, "recommendation": row["recommendation"]})
+        aa = None  # its same-vs-same pairs were not read either
     if partial:
         same = [x for x in data["runs"] if isinstance(x, dict) and x.get("skill") == row["skill"] and x.get("model") == model]
         if any(not _is_partial_row(x) for x in same):
@@ -926,13 +1071,24 @@ def store_verdict(summary: Mapping[str, Any], *, model: str, judge: Optional[str
             row["recommendation"].setdefault("flags", []).append({"key": FLAG_PARTIAL_KEY, "text": sb_copy.FLAG_PARTIAL})
     data["runs"] = [r for r in data["runs"] if not (isinstance(r, dict) and r.get("skill") == row["skill"]
                                                      and r.get("model") == model)] + [row]
-    noise = aa_row(aa, model=model, date=row["date"])
+    pooled = None
+    if isinstance(aa, Mapping) and isinstance(aa.get("pairs"), list) and not partial:
+        # F11: pool this run's same-vs-same outcomes per (model, judge); the first time, seed the pool
+        # from the run folders already on disk. aa["pool"] carries the figure into result.json.
+        if not isinstance(data.get("aa_pool"), list):
+            data["aa_pool"] = sb_noise.seed_from_runs(sb_paths.runs_dir())
+        pooled = sb_noise.add_run(data["aa_pool"], model=aa.get("model") or model, judge=judge,
+                                  run=summary.get("run"), date=row["date"],
+                                  outcomes=[p.get("outcome") for p in aa["pairs"] if isinstance(p, Mapping)])
+        if pooled is not None and isinstance(aa, dict):
+            aa["pool"] = {**pooled, "model": aa.get("model") or model, "judge": judge}
+    noise = aa_row(aa, model=model, date=row["date"], judge=judge, pooled=pooled)
     if noise is not None:
         prev = data.get("aa")
         old: list[Any] = prev if isinstance(prev, list) else []
-        data["aa"] = [r for r in old if not (isinstance(r, dict) and r.get("model") == noise["model"])] + [noise]
+        same = sb_noise.model_key(noise["model"]), sb_noise.model_key(judge)
+        data["aa"] = [r for r in old if not (isinstance(r, dict) and (sb_noise.model_key(r.get("model")),
+                                                                     sb_noise.model_key(r.get("judge")) or same[1]) == same)] + [noise]
     data["generated_at"] = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    sb_evidence._write_atomic(path, data)
     return path

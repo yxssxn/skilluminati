@@ -1,0 +1,128 @@
+{
+ "note": "Outcomes only. Derived 2026-11-14 from the 9 stored verdict runs that have a same-vs-same (A/A) cell: result.json aa.pairs[].outcome, in run order. Model ids from result.json subject_model/judge_model, or from the call rows' model field for the 2 early runs saved before result.json carried them. Run ids replaced with run-N. No task text, answers, reasons, names or paths.",
+ "runs": [
+  {
+   "run": "run-1",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "calls.jsonl",
+   "outcomes": [
+    "tie",
+    "tie",
+    "win",
+    "tie",
+    "tie",
+    "loss",
+    "tie",
+    "tie",
+    "win"
+   ]
+  },
+  {
+   "run": "run-2",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "calls.jsonl",
+   "outcomes": [
+    "tie",
+    "loss",
+    "win",
+    "tie",
+    "loss",
+    "loss",
+    "loss",
+    "win",
+    "tie"
+   ]
+  },
+  {
+   "run": "run-3",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "loss",
+    "tie",
+    "tie",
+    "loss",
+    "loss",
+    "win",
+    "tie",
+    "loss",
+    "win"
+   ]
+  },
+  {
+   "run": "run-4",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "loss",
+    "loss",
+    "tie",
+    "win"
+   ]
+  },
+  {
+   "run": "run-5",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "win",
+    "loss",
+    "win",
+    "loss"
+   ]
+  },
+  {
+   "run": "run-6",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "win",
+    "win",
+    "tie",
+    "tie"
+   ]
+  },
+  {
+   "run": "run-7",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "loss",
+    "tie",
+    "loss",
+    "loss"
+   ]
+  },
+  {
+   "run": "run-8",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "loss",
+    "loss",
+    "win",
+    "tie"
+   ]
+  },
+  {
+   "run": "run-9",
+   "subject_model": "claude-opus-5-5[1m]",
+   "judge_model": "claude-opus-5-5[1m]",
+   "model_source": "result.json",
+   "outcomes": [
+    "win",
+    "loss",
+    "win",
+    "tie"
+   ]
+  }
+ ]
+}

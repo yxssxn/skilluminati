@@ -375,6 +375,14 @@ def combine_orders(w1: Optional[str], w2: Optional[str]) -> tuple[str, bool]:
     return "tie", False
 
 
+def unread(j: "PairJudgement") -> bool:
+    """True when the judge gave nothing readable in either order (empty replies, unparsable text
+    or failed calls). Such a pair was never judged: callers record it as an error, not a tie, so a
+    broken judge cannot read as "no difference". One readable order keeps the tie rule above."""
+    n = len(j.orders) or 2
+    return j.decisive_judgements == 0 and (j.parse_failures + j.call_failures) >= n
+
+
 def judge_pair(call: Callable[[list[dict[str, Any]], str], Any], rubric_text: str, request: str,
                answer_x: str, answer_y: str, *, mode: str = MODE_BLIND, purpose: Optional[str] = None,
                label: str = "judge") -> PairJudgement:

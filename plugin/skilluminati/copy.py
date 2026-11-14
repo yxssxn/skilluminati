@@ -32,11 +32,14 @@ STRENGTH = {"strong": "Probable", "likely": "Plausible"}
 REPORT_COUNTS = "Better {w} · Same {t} · Worse {l}."
 REPORT_USES = "Tested on {n}."  # ({n} is e.g. "its latest 12 uses")
 REPORT_MODEL = "Model: {model}."
-REPORT_NOISE = ("The Owl's own check (one answer judged against itself): Better {w} · Same {t} · Worse {l}."
-                "{noisy}")
-REPORT_NOISY = " The Owl was a little noisy, so read the result with care."
+#: F12: one line in chat (``/skilluminati last``) from a task the skill lost.
+LOST_ONE = "Why it lost: {reason}"
 REPORT_CAVEAT = "One model, one answer each way, judged blind by the Owl. Advice, not a measurement."
 STRENGTH_MEANING = {"strong": "a clear, consistent result", "likely": "a lean, worth re-testing with more uses"}
+#: A "no difference" that is not Probable is shown with these words, not Dead weight: one run cannot
+#: tell no effect from a small one. The stored verdict stays no_difference (see ``shown``).
+UNCLEAR_WORD = "No clear difference yet"
+UNCLEAR_MEANING = "Close to even. One run cannot tell no effect from a small effect."
 
 # ── who and what ─────────────────────────────────────────────────────────────
 
@@ -101,21 +104,35 @@ NO_FLAGS = "none"
 FLAG_FEW_TASKS = "Few tasks: only {n} decisive tasks so far"
 FLAG_STALE = "Stale: tested on {tested}, re-test on {active}"
 FLAG_JUDGES_SPLIT = "Split decision: the Owl leaned on answer order, so treat this with care"
+#: The tested model also judged (or no judge was set, so the active model judged).
+FLAG_SAME_JUDGE = ("Same-model judge: the Owl is grading its own answers, so treat this as a lean. "
+                   "Set judge.provider and judge.model to another maker's model to firm it up")
+#: Half or more of the tested uses went straight to tool calls in real use, or came back empty.
+FLAG_TOOL_DRIVEN = "Most tested uses went straight to tools in real use, or came back empty here. This test reads answers only."
+#: Added to the confidence reason when that flag holds a Probable result at Plausible. ``{word}``
+#: is the strength word shown.
+CONFIDENCE_WHY_TOOL_CAP = "; held at {word} because this test reads answers only"
 
 #: The short note ``commands.stale_label`` returns.
 STALE_NOTE = "stale, re-test on {model}"
+#: Shown with a verdict when the skill's SKILL.md is no longer the file that was tested.
+FLAG_SKILL_CHANGED = "Skill changed since this test"
 
 # ── next step ────────────────────────────────────────────────────────────────
 
 NEXT_STEP_LABEL = "Next step"
 NEXT_KEEP = "Keep"
 NEXT_TRIM = "Consider trimming"
-NEXT_ARCHIVE = "Consider archiving"
+NEXT_ARCHIVE = "Consider archiving"  # only after a Probable result (recommend.next_step)
+#: Next step for a Plausible "no difference" or "hindrance": one more run before acting on it.
+NEXT_ASK_AGAIN = "Ask again"
 NEXT_RUN_MORE = "Run about {n} more {tasks}"  # {tasks} is "task" when n is 1
 #: Next step when the run already used every task in the user's history: no number to act on.
 NEXT_NO_HISTORY = "Not enough history to call it. Use the skill on more work, then run this again."
 #: Flag on a verdict from a run that stopped early (page chip and report line).
 FLAG_PARTIAL = "Partial: the run stopped early"
+FLAG_UNREAD = "Judge failed: it gave no readable answer on {n} of {total} pairs. Check judge.model"
+NEXT_CHECK_JUDGE = "Check the judge setting (judge.model), then ask again."
 #: Shown once under a recommendation: the tool only advises.
 NEXT_NOTE = "Skilluminati never deletes or edits a skill."
 
@@ -140,6 +157,14 @@ def headline(label):
     if pair is None:
         return None
     return pair[0], pair[1], HEADLINE_FORMAT.format(themed=pair[0], plain=pair[1])
+
+
+def shown(key, strength):
+    """``(word, meaning, strength word or None)`` the user sees for a verdict key and strength. A
+    "no difference" that is not Probable shows ``UNCLEAR_WORD`` and no strength word."""
+    if key == "no_difference" and strength != "strong":
+        return UNCLEAR_WORD, UNCLEAR_MEANING, None
+    return WORDS.get(key, WORDS["not_enough"]), MEANING.get(key, MEANING["not_enough"]), STRENGTH.get(strength)
 
 
 def trial_name(kind):
@@ -168,6 +193,7 @@ def payload():
 HELP = (
     "Skilluminati tests whether a skill still helps. Open the Skilluminati page to pick a skill.\n"
     "  /skilluminati <skill>    test one skill now\n"
+    "  /skilluminati last       show the latest result again (add a skill name for that skill's)\n"
     "  /skilluminati stop       stop the test that is running\n"
     "  /skilluminati selftest   " + TRIAL_NAME + ". " + TRIAL_LINE
 )
@@ -191,6 +217,9 @@ CHAT_RESULT_LINE = "{skill}: {verdict} ({strength}). Better {w} · Same {t} · W
 CHAT_RESULT_LINE_NO_STRENGTH = "{skill}: {verdict}. Better {w} · Same {t} · Worse {l}."
 SOURCE_HISTORY = "your history"
 SOURCE_PACK = "built-in questions"
+#: How much evidence a verdict rests on, across every run of the same skill file and model:
+#: "12 tasks, 3 runs". {tasks} is "task" when n is 1, {runs} is "run" when r is 1.
+POOL_LINE = "{n} {tasks}, {r} {runs}"
 
 # --- page wording ---
 
@@ -215,6 +244,9 @@ VERDICT_WORDS = dict(WORDS)
 VERDICT_TONES = {"helps": "success", "no_difference": "muted", "hurts": "destructive", "not_enough": "warn"}
 #: What the verdict means, in one plain line (hover the verdict, and at the top of the working).
 VERDICT_MEANING = dict(MEANING)
+#: A "no difference" that is not Probable (see ``UNCLEAR_WORD``): its word, meaning and summary forms.
+VERDICT_UNCLEAR = {"word": UNCLEAR_WORD, "meaning": UNCLEAR_MEANING,
+                   "summary": ["{n} with no clear difference yet", "{n} with no clear difference yet"]}
 #: The one-line summary at the top: [one, many] per verdict key, ``{n}`` is the count.
 SUMMARY_PARTS = {
     "helps": ["{n} Enlightened", "{n} Enlightened"],
@@ -274,6 +306,8 @@ RUNNING_SELFTEST = TRIAL_NAME
 
 # "Show the working": each line explains itself in plain words.
 WORKING_TASKS = "Task by task"
+#: Beside that heading when the counts above are pooled over more than one run (S8).
+WORKING_TASKS_LATEST_ONLY = "Latest run only"
 WORKING_TASK_ROW = {"win": "Better", "loss": "Worse", "tie": "Same",
                     "error": "Could not be judged"}
 WORKING_TASK_LABEL = "Task {i}"
@@ -286,15 +320,30 @@ WORKING_RANGE_NONE = "Range: no clear wins or losses yet, so there is no range."
 WORKING_ORDER = ("Order check: the Owl saw every pair twice, once in each order. It changed its pick on "
                  "{flips} of {n} tasks.")
 WORKING_ORDER_BIAS = "It picked the answer shown first {pct}% of the time, so treat a close result with care."
-WORKING_NOISE = ("Noise check: on {n} separate tasks we also pitted the answer without the skill against itself. "
-                 "A fair Owl should find no winner there. Result: {wins} better, {losses} worse, "
-                 "{ties} no difference ({fair}).")
-WORKING_NOISE_FAIR = "within chance"
-WORKING_NOISE_UNFAIR = "the Owl leaned one way, so treat close results with care"
+#: F11: the same-vs-same check, pooled per tested model and judge (``noise.py``). A firm pick is the
+#: Owl naming the same winner in both orders between two answers made the same way. Report and page.
+SAME_VS_SAME = "Same-vs-same: a firm pick {firm} of {n} times ({pct}%)."
+SAME_VS_SAME_FEW = "Not enough same-vs-same pairs yet ({n})."
+SAME_VS_SAME_WEAK = ("The judge often picks a winner between identical answers on this model, "
+                     "so single-run leads are weak.")
 WORKING_COST = "This test used {calls} model calls and {tokens} tokens."
 WORKING_RUN = "Run id: {run}"
 WORKING_JUDGE = "The Owl's model: {judge}"
+#: F12: above up to three of the Owl's reasons from tasks the skill lost (report and page).
+LOST_LABEL = "Where it lost, the Owl said:"
+#: Beside the verdict when the tested model judged itself (tag), and its hover text.
+SAME_JUDGE_TAG = "Self-judged"
+SAME_JUDGE_TIP = FLAG_SAME_JUDGE + "."
+#: The same kind of tag for the show-time and tool-driven flags (S7), so the row never hides them.
+#: The Stale hover uses the row's own flag text (with the model names) when it has one.
+STALE_TAG = "Stale"
+STALE_TIP = "Tested on a different model from the one a new test would use. Ask again to re-test."
+SKILL_CHANGED_TAG = "Skill changed"
+SKILL_CHANGED_TIP = FLAG_SKILL_CHANGED + ". Ask again to test this version."
+TOOL_DRIVEN_TAG = "Tool-driven"
+TOOL_DRIVEN_TIP = FLAG_TOOL_DRIVEN
 WORKING_PARTIAL = "This run stopped early, so the result is partial."
+WORKING_TOOL_DRIVEN = FLAG_TOOL_DRIVEN
 WORKING_NONE = "No task-by-task detail was saved for this result."
 LOAD_ERROR = "Could not load the page data"
 LOAD_ERROR_HINT = "The page's backend loads after the plugin is enabled and the gateway has restarted."
@@ -306,3 +355,46 @@ def page_copy():
     names = list(globals())
     w4 = names[names.index("PAGE_TITLE"):]
     return {n.lower(): globals()[n] for n in w4 if n.isupper()}
+
+
+# --- W3 PY ---
+# SEC-S3: added to the run plan line. {names} is "0 names", "1 name", "3 names".
+PLAN_NAMES = "{names} loaded for redaction."
+# W2-Q1: "Why it lost" names each answer by role; the judge wrote "Answer 1" / "Answer 2".
+LOST_ANSWER_WITH = "the answer with the skill"
+LOST_ANSWER_WITHOUT = "the answer without it"
+# --- W3 UI ---
+# In plain words: tonight's page words (W3 UI). Appended after page_copy(), which still picks them
+# up: it reads every upper-case name defined after PAGE_TITLE.
+#: A Plausible (strength ``likely``) result reads as a lean, so its meaning line must not say
+#: "clearly" (review-page should-fix 2). Used on hover and as the first line of the working.
+VERDICT_MEANING_LEAN = {"helps": "Answers lean better with it so far. Keep it, and test again to firm it up.",
+                        "hurts": "Answers lean worse with it so far. Test again before you remove it."}
+#: The summary splits each verdict by how sure (``{part}`` is e.g. "2 Enlightened", ``{word}`` is
+#: Probable or Plausible), so a Plausible count never hides inside a Probable one.
+SUMMARY_STRENGTH = "{part} ({word})"
+#: Shown once under the summary when every result was judged by the model it tested, in place of a
+#: "Self-judged" tag on every row (review-page should-fix 5). Hover shows SAME_JUDGE_TIP.
+SAME_JUDGE_NOTE = "Self-judged: every result here was graded by the same model it tested."
+#: Words the page code used to hold itself (review-page should-fix 7). The chat strip, the run-done
+#: notice and the running row read them from the same page_copy() block.
+RUNNING_COUNT = "{done} of {total}"
+STRIP_OPEN = "Open page"
+STRIP_STOP = "Stop"
+RUN_DONE_READY = "Skilluminati: your result is ready."
+RUN_DONE_SHOW = "Show in chat"
+RUN_DONE_OPEN = "Open page"
+RUN_DONE_BUSY = "Skilluminati: that chat is busy. Your result is on the page."
+#: The chat strip's Stop asks once before it stops a run (review-page should-fix 8).
+STRIP_STOP_ASK = "Stop this test? Calls already made are still paid for."
+STRIP_STOP_YES = "Yes, stop"
+STRIP_STOP_NO = "Keep going"
+#: SEC-S4: the "Show in chat" line. The page builds it from this fixed text and the skill name only;
+#: the prompt text in the run.done event is ignored. ``{what}`` is the skill name or RUN_DONE_SELFTEST.
+RUN_DONE_PROMPT = SHOW_RESULT_PROMPT
+RUN_DONE_SELFTEST = "the self-test"
+
+
+# --- W4 gate 2 ---
+JUDGE_FAILED_TAG = "Judge failed"
+JUDGE_FAILED_TIP = "The judge gave no readable answer on most pairs, so this run says nothing about the skill. Check judge.model."

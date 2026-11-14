@@ -34,6 +34,35 @@ _data_dir_override: Optional[Path] = None
 MIGRATED_MARKER = ".migrated-from"
 
 
+PLUGIN_ROOT = PLUGIN_DIR.parent  # the folder holding plugin.yaml
+_CODE_SUFFIXES = {".py", ".js", ".yaml"}
+
+
+def version_stamp(root: Optional[Path] = None) -> dict[str, Optional[str]]:
+    """``{"plugin_version", "code_fingerprint"}`` for result.json: the version from plugin.yaml and
+    the first 12 hex characters of a SHA-256 over the plugin's own .py, .js and .yaml files, sorted
+    by relative path (each file adds its path, a NUL, its bytes, a NUL). Reads files only, no git:
+    installed copies have no .git. A field it cannot read is None."""
+    import hashlib
+    root = root or PLUGIN_ROOT
+    version = None
+    try:
+        m = re.search(r'^version:\s*["\']?([^"\'\s#]+)', (root / "plugin.yaml").read_text(encoding="utf-8"), re.M)
+        version = m.group(1) if m else None
+    except OSError:
+        pass
+    try:
+        files = sorted((p for p in root.rglob("*") if p.suffix in _CODE_SUFFIXES and p.is_file()
+                        and "__pycache__" not in p.parts), key=lambda p: p.relative_to(root).as_posix())
+        h = hashlib.sha256()
+        for p in files:
+            h.update(p.relative_to(root).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+        fingerprint: Optional[str] = h.hexdigest()[:12] if files else None
+    except OSError:
+        fingerprint = None
+    return {"plugin_version": version, "code_fingerprint": fingerprint}
+
+
 def hermes_home() -> Path:
     """Hermes's home folder for the active profile, from Hermes itself (get_hermes_home).
     Outside Hermes (the test suite) it falls back to $HERMES_HOME, then ~/.hermes."""

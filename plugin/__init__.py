@@ -8,12 +8,17 @@ Model calls go through the host-owned ``ctx.llm`` only, and only after you type
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from .skilluminati import commands, schemas, tools
 
 logger = logging.getLogger(__name__)
 
-ARGS_HINT = "<skill> | stop | selftest"
+ARGS_HINT = "<skill> | last | stop | selftest"
+#: The one small skill the plugin ships, so the agent knows to read a saved verdict when a user
+#: asks whether a skill is worth keeping (Hermes keeps plugin tools behind tool search).
+SKILL_MD = Path(__file__).parent / "skills" / "skilluminati" / "SKILL.md"
+SKILL_DESCRIPTION = "Use when asked if a skill helps, is worth keeping or costs."
 
 
 def register(ctx) -> None:
@@ -39,4 +44,6 @@ def register(ctx) -> None:
         handler=tools.result,
         description="Show the report of a finished Skilluminati run, read from disk (Skilluminati)",
     )
-    logger.debug("skilluminati registered: /skilluminati, skilluminati_estimate, skilluminati_result")
+    if hasattr(ctx, "register_skill"):  # older Hermes releases have no plugin skills; skip quietly
+        ctx.register_skill("skilluminati", SKILL_MD, description=SKILL_DESCRIPTION)
+    logger.debug("skilluminati registered: /skilluminati, skilluminati_estimate, skilluminati_result, skill")

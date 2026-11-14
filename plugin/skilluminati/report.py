@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from . import copy as sb_copy
+from . import noise as sb_noise
 from . import paths as sb_paths
 
 REPORT_FILE = "report.md"
@@ -155,7 +156,8 @@ def _verdict_facts(result: Mapping[str, Any], run_dir: Optional[Path], skill: Op
     if not isinstance(per, Mapping) or not per:
         return None
     name = skill if skill in per else next(iter(per))
-    s = per[name]
+    from . import evidence as sb_evidence
+    s = sb_evidence.effective(per[name]) if isinstance(per[name], Mapping) else per[name]  # F01: pooled verdict
     rec = s.get("recommendation") or {}
     head = rec.get("headline") or {}
     label = head.get("label") or s.get("user_label")
@@ -165,23 +167,41 @@ def _verdict_facts(result: Mapping[str, Any], run_dir: Optional[Path], skill: Op
     stamp = s.get("stamp") or {}
     subject = real_model(result.get("subject_model")) or real_model(stamp.get("model"))
     judge = real_model(result.get("judge_model")) or real_model(stamp.get("judge"))
+    mixed = False  # calls came from more than one model, so a missing judge is not the subject
     if not subject and run_dir is not None:
         seen = models_from_calls(run_dir)
         subject = seen[0] if seen else None
         judge = judge or (seen[0] if len(seen) == 1 else None)
+        mixed = len(seen) > 1
     numbers = rec.get("numbers") or {}
     ns = rec.get("next_step") or {}
+    level = ((rec.get("confidence") or {}).get("level") or "").lower()
+    from . import recommend as sb_recommend
+    if sb_recommend.unclear_shown(label, level):  # a lean is not Dead weight
+        themed, plain_label = sb_copy.UNCLEAR_WORD, sb_copy.UNCLEAR_MEANING
+    ns = sb_recommend.honest_step(label, level, ns)  # S1: below Probable, no step a fresh result would not give
     heavy = s.get("heavy") or {}
     flags = [f for f in rec.get("flags") or [] if isinstance(f, Mapping)
-             and f.get("key") not in {"heavy", "few_tasks", "partial"}]
+             and f.get("key") not in {"heavy", "few_tasks", "partial", "same_judge"}]
+    if not (mixed and judge is None) and sb_recommend.same_judge(subject, judge):
+        flags.append({"key": "same_judge", "text": sb_copy.FLAG_SAME_JUDGE})
     next_key, next_text = ns.get("key"), ns.get("text")
     next_n = ns.get("n") if isinstance(ns.get("n"), int) else numbers.get("tasks_to_settle")
     if next_key == "run_more" and s.get("unused_tasks") == 0:  # every task in the history was used
         next_key, next_text, next_n = "more_history", sb_copy.NEXT_NO_HISTORY, None
+    if any(f.get("key") == "judge_unread" for f in flags):  # gate 2: the judge, not the skill, failed
+        next_key, next_text, next_n = "check_judge", sb_copy.NEXT_CHECK_JUDGE, None
     t = result.get("totals") or {}
+    lean = rec.get("lean") if isinstance(rec.get("lean"), Mapping) else {}
+    capped = lean.get("strength") if lean.get("capped_from") else None  # held at Plausible (tool-driven)
+    # S1: the strength key (strong | likely) the copy table reads; none for "No clear difference yet"
+    unsure = themed == sb_copy.UNCLEAR_WORD or verdict_key({"recommendation": rec, "user_label": label}) == "not_enough"
+    strength = None if unsure else (
+        capped or (lean.get("strength") if lean.get("strength") in STRENGTHS else None)
+        or _CONF_STRENGTH.get(level))
     return {
         "skill": name, "label": label, "themed": themed, "plain": plain_label,
-        "confidence": ((rec.get("confidence") or {}).get("level") or "").lower() or None,
+        "confidence": strength,
         "subject": subject, "judge": judge,
         "better": _int(c.get("wins")), "worse": _int(c.get("losses")), "same": _int(c.get("ties")),
         "harm": _int(s.get("harm_cited_pairs")), "n_tasks": _int(s.get("n_tasks")), "errors": _int(s.get("n_errors")),
@@ -191,7 +211,138 @@ def _verdict_facts(result: Mapping[str, Any], run_dir: Optional[Path], skill: Op
         "aa": result.get("aa") if isinstance(result.get("aa"), Mapping) else None,
         "stopped": result.get("stopped_early"),
         "calls": _int(t.get("calls")), "tokens": _int(t.get("total_tokens")), "minutes": t.get("minutes"),
+        "show_flags": [],
+        "pool_line": sb_evidence.pool_line(s.get("pool_tasks"), s.get("pool_runs")),  # F01: "12 tasks, 3 runs"
+        "lost_reasons": lost_reasons(run_dir, name),  # F12: the Owl's words where it lost
     }
+
+
+# ── F12: where it lost, in the Owl's words ───────────────────────────────────
+
+LOST_REASON_MAX = 160
+LOST_REASONS_SHOWN = 3
+
+
+def _order_reason(order: Any) -> Optional[str]:
+    """The ``reason`` from one judge order's stored text (one JSON object), else None."""
+    text = order.get("text") if isinstance(order, Mapping) else None
+    if not isinstance(text, str):
+        return None
+    try:
+        obj = json.loads(text.strip())
+    except ValueError:
+        a, b = text.find("{"), text.rfind("}")
+        try:
+            obj = json.loads(text[a:b + 1]) if 0 <= a < b else None
+        except ValueError:
+            obj = None
+    reason = obj.get("reason") if isinstance(obj, Mapping) else None
+    reason = " ".join(reason.split()) if isinstance(reason, str) else ""
+    return reason or None
+
+
+def _read_pairs(run_dir: Path, skill: str) -> list[Mapping[str, Any]]:
+    """The skill's own pairs from a run's ``pairs.jsonl`` (never the same-vs-same cell). Bad lines are skipped."""
+    out: list[Mapping[str, Any]] = []
+    try:
+        with (run_dir / "pairs.jsonl").open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    p = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(p, Mapping) and p.get("cell") == skill and isinstance(p.get("task_hash"), str):
+                    out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def _pooled_runs(run_dir: Path, skill: str) -> Optional[list[Mapping[str, Any]]]:
+    """The runs pooled with this one (``pools/<skill>.json`` beside the runs folder), or None when
+    this run is in no pool (saved before pooling, or stopped early)."""
+    from . import evidence as sb_evidence
+    try:
+        data = json.loads((run_dir.parent.parent / sb_evidence.POOL_DIR / f"{sb_paths.safe_name(skill)}.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for pool in (data.get("pools") if isinstance(data, Mapping) and isinstance(data.get("pools"), list) else []):
+        runs = [r for r in (pool.get("runs") if isinstance(pool, Mapping) else None) or [] if isinstance(r, Mapping)]
+        if any(r.get("run") == run_dir.name for r in runs):
+            return runs
+    return None
+
+
+_ANSWER_RE = re.compile(r"\b([Aa])nswer ([12])\b")
+
+
+def shown_reason(reason: str, first: Any) -> str:
+    """The judge's reason as shown in "Why it lost": "Answer 1" / "Answer 2" become the answer with
+    or without the skill, from the order's ``first`` (``x`` = the answer with the skill shown as
+    Answer 1). Display only: the stored judge text and the judge prompt never change. An order with
+    no known ``first`` is shown verbatim."""
+    if first not in ("x", "y"):
+        return reason
+
+    def role(m: "re.Match[str]") -> str:
+        with_skill = (m.group(2) == "1") == (first == "x")
+        word = sb_copy.LOST_ANSWER_WITH if with_skill else sb_copy.LOST_ANSWER_WITHOUT
+        starts = re.search(r"(?:^|[.!?:]\s+)$", m.string[:m.start()]) is not None  # a sentence starts here
+        return word[0].upper() + word[1:] if starts else word
+    return _ANSWER_RE.sub(role, reason)
+
+
+def lost_reasons(run_dir: Optional[Path], skill: str, limit: int = LOST_REASONS_SHOWN) -> list[str]:
+    """Up to ``limit`` of the Owl's one-line reasons from tasks the skill lost: the task's pooled
+    outcome is Worse (this run's own outcome when it is in no pool), and only pairs where the judge
+    named the same winner in both orders. One reason per task (its shortest), shortest first, each
+    cut to 160 characters. Read from the stored ``pairs.jsonl``; no model calls. Never raises."""
+    if run_dir is None:
+        return []
+    try:
+        from . import evidence as sb_evidence
+        pooled = _pooled_runs(run_dir, skill)
+        names = [str(r.get("run")) for r in pooled] if pooled else [run_dir.name]
+        pairs = {n: _read_pairs(run_dir.parent / Path(n).name, skill) for n in dict.fromkeys(names)}
+        if pooled:
+            outcomes = sb_evidence.pooled_counts(pooled)["tasks"]
+        else:
+            samples: dict[str, list[str]] = {}
+            for p in pairs[run_dir.name]:
+                samples.setdefault(p["task_hash"], []).append(str(p.get("outcome")))
+            outcomes = {h: sb_evidence.task_outcome(v) for h, v in samples.items()}
+        best: dict[str, str] = {}
+        for rows in pairs.values():
+            for p in rows:
+                j = p.get("judge") if isinstance(p.get("judge"), Mapping) else {}
+                if outcomes.get(p["task_hash"]) != "loss" or p.get("outcome") != "loss" or j.get("agreed") is not True:
+                    continue
+                for order in j.get("orders") or []:
+                    r = _order_reason(order)
+                    r = shown_reason(r, order.get("first")) if r else r  # W2-Q1: roles, not positions
+                    if r and (p["task_hash"] not in best or len(r) < len(best[p["task_hash"]])):
+                        best[p["task_hash"]] = r
+        shown = sorted(dict.fromkeys(best.values()), key=lambda r: (len(r), r))[:max(0, limit)]
+        return [r if len(r) <= LOST_REASON_MAX else r[:LOST_REASON_MAX - 3].rstrip() + "..." for r in shown]
+    except Exception:
+        return []
+
+
+def _with_show_flags(f: dict[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
+    """F03: add the flags worked out now (skill changed, model changed) and the stored pooled
+    same-vs-same figure to the report facts. The saved report.md never holds them; they are added
+    each time the report is shown."""
+    from . import evidence
+    s = (result.get("per_skill") or {}).get(f["skill"]) or {}
+    row = {"skill": f["skill"], "model": f["subject"], "source": result.get("source"),
+           "skill_sha256": s.get("skill_sha256") if isinstance(s, Mapping) else None}
+    have = {str(t).split(":")[0] for t in f["flags"]}
+    extra = evidence.flags_for_row(row, active=evidence.active_model())
+    f["show_flags"] = [x["text"] for x in extra if x["text"].split(":")[0] not in have]
+    # S6: the pooled same-vs-same row stored for this model and judge, as the page shows it
+    f["noise_now"] = sb_noise.stored_figure(f["subject"], f["judge"])
+    return f
 
 
 def next_step_text(key: Any, n: Any, fallback: Any = None) -> Optional[str]:
@@ -255,8 +406,9 @@ def _stop_text(stop: Any) -> Optional[str]:
     return f"Stopped early: {text}. This is a partial result." if limit else f"Stopped early: {text}."
 
 
-def _report_lines(f: Mapping[str, Any], bold: bool = False) -> list[str]:
-    """The finished report, one fact per line. Lines: verdict, counts, uses tested, model, flags, the Owl's own check, caveat, cost."""
+def _report_lines(f: Mapping[str, Any], bold: bool = False, short: bool = False) -> list[str]:
+    """The finished report, one fact per line. Lines: verdict, counts, uses tested, model, flags,
+    where it lost, the Owl's own check, caveat, cost. ``short`` (chat ``last``): one reason at most."""
     strength = sb_copy.STRENGTH.get(f["confidence"] or "", "")
     head = f"{f['skill']}: {f['themed']}" + (f" ({strength})" if strength else "") + "."
     lines = [(f"**{head}**" if bold else head) + (f" {f['plain']}" if f["plain"] else "")]
@@ -264,6 +416,8 @@ def _report_lines(f: Mapping[str, Any], bold: bool = False) -> list[str]:
         lines.append(f"{sb_copy.FLAG_PARTIAL}.")
     lines.append(sb_copy.REPORT_COUNTS.format(w=f["better"], t=f["same"], l=f["worse"])
                  + (f" Could not be judged {f['errors']}." if f["errors"] else ""))
+    if f.get("pool_line"):
+        lines.append(f"{f['pool_line']}.")
     if f["n_tasks"]:
         lines.append(sb_copy.REPORT_USES.format(n=plural(f["n_tasks"], "use")))
     model = re.sub(r"\[[^\]]*\]$", "", f["subject"] or "") or "not recorded"
@@ -273,15 +427,17 @@ def _report_lines(f: Mapping[str, Any], bold: bool = False) -> list[str]:
     if f["heavy_tokens"]:
         lines.append(f"Heavy: adds {f['heavy_tokens']:,} tokens each time it loads.")
     lines += [f"{t}." if not str(t).endswith(".") else str(t) for t in f["flags"]]
-    if f["next_key"] in ("run_more", "more_history"):  # Unproven only: the verdict line already says keep / fix
+    lines += [f"{t}." for t in f.get("show_flags") or []]
+    lost = f.get("lost_reasons") or []
+    if lost and short:
+        lines.append(sb_copy.LOST_ONE.format(reason=lost[0]))
+    elif lost:
+        lines += [sb_copy.LOST_LABEL, *[f"- {r}" for r in lost]]
+    if f["next_key"] in ("run_more", "more_history", "ask_again"):  # the verdict line already says keep / fix
         step = next_step_text(f["next_key"], f["next_n"], f["next_text"])
         if step:
             lines.append(f"Next: {step}.")
-    aa = f["aa"]
-    if aa:
-        lines.append(sb_copy.REPORT_NOISE.format(w=_int(aa.get("wins")), t=_int(aa.get("ties")),
-                                                 l=_int(aa.get("losses")),
-                                                 noisy=sb_copy.REPORT_NOISY if aa.get("noisy") else ""))
+    lines += sb_noise.lines(f.get("noise_now") or sb_noise.of_aa(f["aa"]))  # F11/S6: pooled same-vs-same firm picks
     stop = _stop_text(f["stopped"])
     if stop:
         lines.append(stop)
@@ -301,9 +457,9 @@ def _cost_line(f: Mapping[str, Any]) -> str:
     return ", ".join(bits) + "."
 
 
-def verdict_plain(f: Mapping[str, Any]) -> str:
-    """Terminal shape: same lines, no bold."""
-    return "\n".join(_report_lines(f))
+def verdict_plain(f: Mapping[str, Any], short: bool = False) -> str:
+    """Terminal shape: same lines, no bold. ``short`` (chat ``last``): one lost reason at most."""
+    return "\n".join(_report_lines(f, short=short))
 
 
 # ── self-test ────────────────────────────────────────────────────────────────
@@ -397,11 +553,28 @@ def selftest_plain(f: Mapping[str, Any]) -> str:
 
 # ── entry points ─────────────────────────────────────────────────────────────
 
-def build(run_dir: Path, *, plain: bool = False) -> Optional[str]:
-    """The report for one finished run folder; None when its result cannot be read."""
+def version_line(result: Mapping[str, Any]) -> Optional[str]:
+    """W2 1: "Skilluminati 0.2.0 (code abc123def456)" from the stamp in result.json; None on
+    results saved before the stamp."""
+    v, code = result.get("plugin_version"), result.get("code_fingerprint")
+    if not (isinstance(v, str) and v and isinstance(code, str) and code):
+        return None
+    return f"Skilluminati {v} (code {code})"
+
+
+def build(run_dir: Path, *, plain: bool = False, live: bool = False, short: bool = False) -> Optional[str]:
+    """The report for one finished run folder; None when its result cannot be read. ``live`` adds
+    the flags worked out at show time (skill changed, model changed). The build line, when the
+    result has one, comes last."""
     result = load_result(run_dir)
     if result is None:
         return None
+    text = _build(run_dir, result, plain=plain, live=live, short=short)
+    foot = version_line(result)
+    return f"{text}\n{foot}" if text is not None and foot else text
+
+
+def _build(run_dir: Path, result: Mapping[str, Any], *, plain: bool, live: bool, short: bool) -> Optional[str]:
     if run_kind(run_dir.name) == "selftest" or "aggregate" in result:
         f = _selftest_facts(result, run_dir)
         if f is None:
@@ -412,7 +585,12 @@ def build(run_dir: Path, *, plain: bool = False) -> Optional[str]:
         stop = _stop_text(result.get("stopped_early")) or "The run finished with no verdict."
         skill = run_skill(run_dir.name) or "this skill"
         return f"No verdict for {skill}. {stop}"
-    return verdict_plain(f) if plain else verdict_markdown(f)
+    if live:
+        try:
+            f = _with_show_flags(f, result)
+        except Exception:
+            pass  # a flag is a nice-to-have; the report is not
+    return verdict_plain(f, short=short) if plain else verdict_markdown(f)
 
 
 def headline(run_dir: Path) -> Optional[str]:
@@ -453,21 +631,23 @@ def save(run_dir: Path) -> Optional[Path]:
 
 
 def saved_or_built(run_dir: Path) -> Optional[str]:
-    """The saved ``report.md`` when present, else built from ``result.json``."""
+    """The saved ``report.md`` when present, else built from ``result.json``. When a flag worked
+    out now applies (skill or model changed since), the report is rebuilt with it."""
     p = run_dir / REPORT_FILE
     try:
         if p.is_file():
             text = p.read_text(encoding="utf-8").strip()
             if text:
-                return text
+                live = build(run_dir, live=True)
+                return live if live is not None and live != build(run_dir) else text
     except OSError:
         pass
-    return build(run_dir)
+    return build(run_dir, live=True)
 
 
 def terminal(run_dir: Path) -> Optional[str]:
-    """``/skilluminati last``: the plain report, then the folder path on its own line."""
-    text = build(run_dir, plain=True)
+    """``/skilluminati last``: the plain report (one lost reason at most), then the folder path on its own line."""
+    text = build(run_dir, plain=True, live=True, short=True)
     return None if text is None else f"{text}\nFolder: {run_dir}"
 
 
@@ -525,11 +705,12 @@ def _pct(x: Any) -> Optional[int]:
 
 
 def _noise(aa: Any) -> Optional[dict[str, Any]]:
-    """The noise check (skill-free answer judged against itself) as plain counts, else None."""
-    if not isinstance(aa, Mapping) or not isinstance(aa.get("wins"), int):
+    """The same-vs-same check (F11): firm picks of judged pairs, pooled when the run or stored row
+    carries the pool, and the page's lines for it. None with no A/A data."""
+    fig = sb_noise.of_aa(aa)
+    if fig is None:
         return None
-    return {"wins": _int(aa.get("wins")), "losses": _int(aa.get("losses")), "ties": _int(aa.get("ties")),
-            "noisy": aa.get("noisy") is True}
+    return {"firm": fig["firm"], "n": fig["n"], "weak": fig["weak"], "lines": sb_noise.lines(fig)}
 
 
 def _skill_block(result: Mapping[str, Any], skill: str) -> Mapping[str, Any]:
@@ -563,7 +744,7 @@ def working(run_dir: Optional[Path], skill: str, result: Optional[Mapping[str, A
     """The detail behind one verdict, from its run folder. Plain scalars and short lists only."""
     out: dict[str, Any] = {"run": run_dir.name if run_dir else None, "tasks": [], "order": None,
                            "bias_pct": None, "noise": None, "calls": None, "tokens": None, "judge": None,
-                           "partial": False}
+                           "partial": False, "tool_driven": False, "latest_only": False, "lost_reasons": []}
     result = result if result is not None else (load_result(run_dir) if run_dir else None)
     if not result:
         return out
@@ -582,6 +763,7 @@ def working(run_dir: Optional[Path], skill: str, result: Optional[Mapping[str, A
     out["calls"], out["tokens"] = _int(t.get("calls")) or None, _int(t.get("total_tokens")) or None
     out["judge"] = real_model(result.get("judge_model"))
     out["partial"] = bool(result.get("stopped_early"))
+    out["lost_reasons"] = lost_reasons(run_dir, skill)  # F12: plain strings; the page renders them as text
     return out
 
 
@@ -595,11 +777,17 @@ def page_result(row: Mapping[str, Any], runs_dir: Optional[Path] = None) -> Opti
     wins, losses, ties = _int(row.get("wins")), _int(row.get("losses")), _int(row.get("ties"))
     folder, result = _run_for(row, runs_dir) if runs_dir is not None else (None, None)
     w = working(folder, skill, result)
-    w["noise"] = w["noise"] or _noise(row.get("_aa"))
+    w["noise"] = _noise(row.get("_aa")) or w["noise"]  # F11: the stored row is the pooled figure
     w["judge"] = w["judge"] or real_model(row.get("judge"))
     flags = _rec(row)[0].get("flags")
     w["partial"] = w["partial"] or any(isinstance(f, Mapping) and f.get("key") == "partial"
                                        for f in (flags if isinstance(flags, list) else []))
+    w["tool_driven"] = any(isinstance(f, Mapping) and f.get("key") == "tool_driven"
+                           for f in (flags if isinstance(flags, list) else []))
+    w["judge_unread"] = any(isinstance(f, Mapping) and f.get("key") == "judge_unread"
+                            for f in (flags if isinstance(flags, list) else []))
+    # S8: the counts above are pooled over runs, the task list below is one run's
+    w["latest_only"] = isinstance(row.get("pool_runs"), int) and row["pool_runs"] > 1
     counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
     if not counts and isinstance(result, Mapping) and isinstance(result.get("counts"), Mapping):
         counts = result["counts"]
@@ -613,7 +801,23 @@ def page_result(row: Mapping[str, Any], runs_dir: Optional[Path] = None) -> Opti
         "wins": wins, "losses": losses, "ties": ties, "n": wins + losses + ties,
         "model": real_model(row.get("model")), "date": row.get("date") if isinstance(row.get("date"), str) else None,
         "low": _pct(row.get("low")), "high": _pct(row.get("high")), "working": w,
+        # F01: how many tasks and runs this verdict rests on (None on rows saved before pooling)
+        "pool_tasks": row.get("pool_tasks") if isinstance(row.get("pool_tasks"), int) else None,
+        "pool_runs": row.get("pool_runs") if isinstance(row.get("pool_runs"), int) else None,
+        "pool_line": _pool_line(row),
+        "same_judge": _same_judge(row.get("model"), w.get("judge")),
     }
+
+
+def _pool_line(row: Mapping[str, Any]) -> Optional[str]:
+    from . import evidence as sb_evidence
+    return sb_evidence.pool_line(row.get("pool_tasks"), row.get("pool_runs"))
+
+
+def _same_judge(subject: Any, judge: Any) -> bool:
+    """The Same-model judge flag for a page row (recommend.same_judge)."""
+    from . import recommend as sb_recommend
+    return sb_recommend.same_judge(subject, judge)
 
 
 _JUDGED = re.compile(r":\s*(win|loss|tie|error)\s*$")
@@ -675,6 +879,6 @@ def running(runs_dir: Optional[Path] = None, now: Optional[float] = None) -> Opt
 
 
 __all__ = ["REPORT_FILE", "CAVEAT", "plural", "real_model", "finished_runs", "find_run", "load_result",
-           "models_from_calls", "next_step_text", "build", "headline", "save", "saved_or_built", "terminal",
-           "run_kind", "run_skill", "VERDICT_KEYS", "verdict_key", "verdict_strength", "working",
+           "models_from_calls", "next_step_text", "build", "version_line", "headline", "save", "saved_or_built", "terminal",
+           "run_kind", "run_skill", "lost_reasons", "VERDICT_KEYS", "verdict_key", "verdict_strength", "working",
            "page_result", "running"]

@@ -33,7 +33,7 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -44,11 +44,6 @@ TASKS_PER_SKILL = 12
 AA_TASKS = 10
 CALLS_PER_PAIR = 4  # 2 subject + 2 judge
 HARD_CAP = sb_runner.HARD_CAP
-#: Pins used by the dev harness that produced the published showcase run. The plugin never uses them:
-#: ``RealRunConfig`` defaults to the user's active provider and model (``None``).
-SUB_PROVIDER = sb_runner.SUB_PROVIDER
-SUBJECT_MODEL = sb_runner.OPUS
-JUDGE_MODEL = sb_runner.HAIKU
 
 #: Words in a judge reason (on a pair the WITH arm lost) that count as "cites a harm". Documented
 #: here so the "Gets in the way" split is a rule in code, not a reading.
@@ -271,9 +266,14 @@ def tracked_pair(p: dict[str, Any]) -> dict[str, Any]:
     return {"cell": p.get("cell"), "skill": p.get("skill"), "mode": p.get("mode"), "task_hash": p.get("task_hash"),
             "outcome": p.get("outcome"), "error_kind": ("guard" if str(p.get("error", "")).startswith("guard") else
                                                         "subject" if p.get("error") else None),
+            "tool_driven": p.get("tool_driven") is True,
             "arms": {a: {"ok": r.get("ok"), "text_chars": len(r.get("text") or ""), "error_type": r.get("error_type")}
                      for a, r in (p.get("arms") or {}).items()},
             "judge": j}
+
+
+unread = sb_judge.unread
+UNREAD_ERROR = "judge gave no readable answer"
 
 
 def wlt(pairs: list[dict[str, Any]]) -> dict[str, int]:
@@ -366,12 +366,14 @@ class RealRunner:
         self.skill_paths: dict[str, str] = {}
         self.skill_redaction: dict[str, dict[str, int]] = {}
         self.skill_load_tokens: dict[str, int] = {}
+        self.skill_sha256: dict[str, str] = {}
         self.purposes: dict[str, str] = {}
         for s in cfg.skills:
             path = find_skill_file(cfg.skills_dir, s)
             if path is None:
                 raise FileNotFoundError(f"no SKILL.md with frontmatter name {s!r} under {cfg.skills_dir}")
             raw = path.read_text(encoding="utf-8", errors="replace")
+            self.skill_sha256[s] = hashlib.sha256(path.read_bytes()).hexdigest()  # F03: the file that was tested
             self.skill_load_tokens[s] = sb_cost.estimate_tokens(raw)  # the raw text a skill_view returns
             text, counts = sb_redact.redact(raw, names=self.names)
             # Relative to the skills folder: no home directory or user name reaches a prompt or report.
@@ -518,7 +520,8 @@ class RealRunner:
         request = judge_request(msgs_x)  # the same text for both arms: the skill pair has no words
         pair: dict[str, Any] = {"cell": cell, "skill": skill, "mode": task["mode"], "task_hash": th,
                                 "session_id": task.get("session_id"), "load_message_id": task.get("load_message_id"),
-                                "user_turn": request, "arms": {label_x: rec_x.to_dict(), label_y: rec_y.to_dict()}}
+                                "user_turn": request, "arms": {label_x: rec_x.to_dict(), label_y: rec_y.to_dict()},
+                                "tool_driven": task.get("tool_driven") is True}
         if not (rec_x.ok and rec_y.ok):
             pair.update(outcome="error", judge=None, error="subject call failed")
         else:
@@ -533,7 +536,10 @@ class RealRunner:
                 pair.update(outcome="error", judge=None, error=f"guard: {str(exc)[:120]}")
             else:
                 pair["judge"] = judgement.to_dict()
-                pair["outcome"] = {"x": "win", "y": "loss", "tie": "tie"}[judgement.outcome]
+                if unread(judgement):
+                    pair.update(outcome="error", error=UNREAD_ERROR)
+                else:
+                    pair["outcome"] = {"x": "win", "y": "loss", "tie": "tie"}[judgement.outcome]
         with self._lock, self.pairs_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(pair, ensure_ascii=False) + "\n")
         return pair
@@ -560,6 +566,8 @@ class RealRunner:
             for f in futures:
                 try:
                     out.append(f.result())
+                except CancelledError:  # cancelled by the first stop below; that stop is raised after the loop
+                    continue
                 except sb_llm.RunStop as exc:
                     first = first or exc
                     stop.set()
@@ -591,6 +599,9 @@ class RealRunner:
         harm = reasons_citing_harm(ok)
         lean = sb_verdict.lean(combined["wins"], combined["losses"], combined["ties"])
         label = sb_verdict.LEAN_LABEL[lean["verdict"]]
+        # tool-driven uses plus empty answers, over every tested use (errors included)
+        tools = sb_recommend.tool_driven_counts(pairs)
+        lean = sb_recommend.cap_lean(lean, tools) or lean  # shown strength held at Plausible; verdict unchanged
         effect = "negative" if lean["verdict"] == sb_verdict.HURTS else "none"
         tot = sb_runner.totals(calls, seconds)
         heavy = sb_cost.heavy_flag(self.skill_load_tokens[skill], self.heavy_set.values())
@@ -603,6 +614,7 @@ class RealRunner:
             "skill": skill, "skill_path": self.skill_paths[skill], "purpose_chars": len(self.purposes[skill]),
             "skill_redaction_counts": self.skill_redaction[skill],
             "n_tasks": len(pairs), "n_errors": len(pairs) - len(ok),
+            "n_unread": sum(1 for p in pairs if p.get("error") == UNREAD_ERROR),
             "strict": verdict_block([p for p in ok if p["mode"] == "strict"]),
             "frozen": verdict_block([p for p in ok if p["mode"] != "strict"]),
             "combined": combined,
@@ -614,7 +626,9 @@ class RealRunner:
                 label, wins=combined["wins"], losses=combined["losses"], ties=combined["ties"],
                 low=combined["low"] if v.n_decisive else None, high=combined["high"] if v.n_decisive else None,
                 tasks_to_settle=v.tasks_to_settle, heavy=heavy, verdict_model=self.cfg.subject_model, lean=lean,
-                active_model=self.cfg.subject_model, job_first_share=first_share),
+                active_model=self.cfg.subject_model, job_first_share=first_share,
+                judge_model=self.cfg.judge_model, tools=tools),
+            "tools": tools,
             "stamp": {"model": self.cfg.subject_model, "judge": self.cfg.judge_model, "judge_mode": self.cfg.judge_mode,
                       "date": dt.date.today().isoformat(), "test_type": "single-call replay"},
             "judge_stats": judge_stats, "guard_notes": self.guard_notes.get(skill, {}),
@@ -626,6 +640,7 @@ class RealRunner:
                      "sum_latency_minutes": round(sum(c["latency_s"] for c in calls) / 60, 2),
                      "workers": self.cfg.workers, "pass_15min": tot["minutes"] <= 15.0},
             "pairs": [tracked_pair(p) for p in pairs],
+            "skill_sha256": self.skill_sha256.get(skill),  # F03: SHA-256 of the SKILL.md bytes tested
         }
 
     def run_aa(self) -> dict[str, Any]:
@@ -642,7 +657,7 @@ class RealRunner:
         a = stats.aa_noise([p["outcome"] for p in ok])
         return {"cell": "aa", "model": self.cfg.subject_model, "n_pairs": len(pairs), "n_errors": len(pairs) - len(ok),
                 "wins": a.wins, "losses": a.losses, "ties": a.ties, "n_decisive": a.n_decisive, "rate": a.rate,
-                "low": round(a.low, 4), "high": round(a.high, 4), "tie_share": a.tie_share, "noisy": a.noisy,
+                "low": round(a.low, 4), "high": round(a.high, 4), "tie_share": a.tie_share, "firm": a.n_decisive,
                 "verdict": stats.verdict(a.wins, a.losses, a.ties).verdict,
                 "skills_drawn": {s: sum(1 for t in self.aa_tasks if t["skill"] == s) for s in self.cfg.skills},
                 "judge_stats": sb_runner._judge_stats(ok),

@@ -153,7 +153,7 @@ def _clean_heavy(value: Any) -> dict[str, Any] | None:
 RUN_KEYS = ("skill", "verdict", "effect", "user_label", "model", "judge", "date", "wins", "losses", "ties",
             "low", "high", "tasks_to_settle", "heavy", "recommendation", "source", "test_type", "stale", "run")
 _SCALAR = (str, int, float, bool, type(None))
-AA_KEYS = ("model", "wins", "losses", "ties", "low", "high", "noisy", "date")
+AA_KEYS = ("model", "judge", "wins", "losses", "ties", "low", "high", "firm", "pooled", "date")
 
 
 def _scalars(value: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
@@ -177,7 +177,23 @@ def _clean_run(run: dict[str, Any]) -> dict[str, Any]:
     counts = _scalars(run.get("counts"), ("uses", "eligible", "tested"))
     if counts:
         out["counts"] = counts
+    _add_pool(out, run)
     return out
+
+
+def _add_pool(out: dict[str, Any], run: dict[str, Any]) -> None:
+    """F01: ``pool_tasks``, ``pool_runs`` and the line "12 tasks, 3 runs" when the row has them."""
+    n, r = run.get("pool_tasks"), run.get("pool_runs")
+    if not (isinstance(n, int) and isinstance(r, int)) or isinstance(n, bool) or isinstance(r, bool):
+        return
+    out["pool_tasks"], out["pool_runs"] = n, r
+    ev = _sub("evidence")
+    try:
+        line = ev.pool_line(n, r) if ev is not None else None
+    except Exception:
+        line = None
+    if line:
+        out["pool_line"] = line
 
 
 def _run_with_heavy(run: dict[str, Any]) -> dict[str, Any]:
@@ -190,8 +206,40 @@ def _run_with_recommendation(run: dict[str, Any]) -> dict[str, Any]:
     rec_mod = _sub("recommend")
     if rec_mod is None:
         return _drop_raw_recommendation(run)
-    stored = rec_mod.clean(run.get("recommendation")) if "recommendation" in run else None
+    stored = rec_mod.clean(run.get("recommendation"), row=run) if "recommendation" in run else None
     return {**run, "recommendation": stored or rec_mod.from_run(run)}
+
+
+def _show_flags(raw: dict[str, Any], active: Any) -> list[dict[str, str]]:
+    """F03: flags worked out now for a stored row (skill file changed, model changed). [] on any trouble."""
+    ev = _sub("evidence")
+    try:
+        return ev.flags_for_row(raw, active=active) if ev is not None else []
+    except Exception:
+        return []
+
+
+def _active_model() -> Any:
+    ev = _sub("evidence")
+    try:
+        return ev.active_model() if ev is not None else None
+    except Exception:
+        return None
+
+
+def _run_with_show_flags(run: dict[str, Any], raw: dict[str, Any], active: Any) -> dict[str, Any]:
+    """Add the show-time flags to the row's recommendation, and ``stale`` / ``skill_changed`` when set."""
+    extra = _show_flags(raw, active)
+    if not extra:
+        return run
+    out = dict(run)
+    rec = out.get("recommendation")
+    if isinstance(rec, dict):
+        ev = _sub("evidence")
+        out["recommendation"] = {**rec, "flags": ev.merge_flags(rec.get("flags"), extra)}
+    for f in extra:
+        out[f["key"]] = True
+    return out
 
 
 def _drop_raw_recommendation(run: dict[str, Any]) -> dict[str, Any]:
@@ -226,10 +274,12 @@ def _read_verdicts(home: Path | None = None) -> dict[str, Any]:
         aa = data.get("aa")
         if not isinstance(runs, list) or not isinstance(aa if aa is not None else [], list):
             return _error("verdicts.json has no valid runs list")
+        active = _active_model() if any(isinstance(r, dict) for r in runs) else None
         out: dict[str, Any] = {
             "schema": data.get("schema", SCHEMA),
             "generated_at": data.get("generated_at"),
-            "runs": [_run_with_recommendation(_run_with_heavy(r)) for r in runs if isinstance(r, dict)],
+            "runs": [_run_with_show_flags(_run_with_recommendation(_run_with_heavy(r)), r, active)
+                     for r in runs if isinstance(r, dict)],
             "aa": [c for c in (_scalars(r, AA_KEYS) for r in (aa or [])) if c is not None],
             "position_bias": _number(data.get("position_bias")),
             "empty": False,
@@ -338,7 +388,8 @@ def page_results(home: Path | None = None) -> list[dict[str, Any]]:
     except (OSError, ValueError):
         return []
     runs = data.get("runs") if isinstance(data, dict) and isinstance(data.get("runs"), list) else []
-    aa = {r.get("model"): r for r in (data.get("aa") or []) if isinstance(r, dict)} if isinstance(data, dict) else {}
+    aa_rows = [r for r in (data.get("aa") or []) if isinstance(r, dict)] if isinstance(data, dict) else []
+    noise = _sub("noise")
     latest: dict[str, dict[str, Any]] = {}
     for r in runs:
         if not isinstance(r, dict) or not isinstance(r.get("skill"), str):
@@ -347,12 +398,20 @@ def page_results(home: Path | None = None) -> list[dict[str, Any]]:
         if prev is None or str(r.get("date") or "") >= str(prev.get("date") or ""):
             latest[r["skill"]] = r
     out = []
+    active = _active_model() if latest else None
     for r in latest.values():
         try:
-            row = rep.page_result({**r, "_aa": aa.get(r.get("model"))}, data_dir(home) / "runs")
+            # F11: the pooled noise row for this model and judge, ids matched the way the report does
+            aa = noise.stored_row(aa_rows, r.get("model"), r.get("judge")) if noise is not None else None
+            row = rep.page_result({**r, "_aa": aa}, data_dir(home) / "runs")
         except Exception:
             row = None
         if row is not None:
+            extra = _show_flags(r, active)  # F03: skill or model changed since this test
+            row["show_flags"] = [f["text"] for f in extra]
+            row["stale"] = any(f["key"] == "stale" for f in extra)
+            row["skill_changed"] = any(f["key"] == "skill_changed" for f in extra)
+            row["usable"] = row.get("eligible")  # PAGE-M2: the page's "usable as tests" count (None if unknown)
             out.append(row)
     out.sort(key=lambda x: (str(x.get("date") or ""), x["working"].get("run") or ""), reverse=True)
     return out

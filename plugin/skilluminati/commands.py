@@ -91,8 +91,9 @@ def _norm_model(model) -> str | None:
 
 def stale_label(verdict_model, active_model):
     """None if the verdict's model matches the active one or either is unknown; else a stale note."""
+    from . import recommend  # the shared model key: tag, date and provider prefix ignored
     vm, am = _norm_model(verdict_model), _norm_model(active_model)
-    if vm is None or am is None or vm.lower() == am.lower():
+    if vm is None or am is None or (recommend.model_key(vm) or vm.lower()) == (recommend.model_key(am) or am.lower()):
         return None
     return sb_copy.STALE_NOTE.format(model=am)
 

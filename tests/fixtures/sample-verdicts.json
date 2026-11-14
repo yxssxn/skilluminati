@@ -1,0 +1,73 @@
+{
+  "demo": true,
+  "schema": 1,
+  "generated_at": "2026-11-07T00:00:00+11:00",
+  "runs": [
+    {
+      "skill": "helpful-sample",
+      "model": "demo-cheap-model",
+      "judge": "demo-judge-model",
+      "test_type": "single-call replay",
+      "verdict": "Keep",
+      "wins": 9,
+      "losses": 1,
+      "ties": 2,
+      "low": 0.6,
+      "high": 0.97,
+      "tasks_to_settle": null,
+      "source": "selftest"
+    },
+    {
+      "skill": "poisoned-sample",
+      "model": "demo-cheap-model",
+      "judge": "demo-judge-model",
+      "test_type": "single-call replay",
+      "verdict": "Drop",
+      "wins": 1,
+      "losses": 9,
+      "ties": 2,
+      "low": 0.03,
+      "high": 0.4,
+      "tasks_to_settle": null,
+      "source": "selftest"
+    },
+    {
+      "skill": "placebo-sample",
+      "model": "demo-cheap-model",
+      "judge": "demo-judge-model",
+      "test_type": "single-call replay",
+      "verdict": "Unsure",
+      "wins": 5,
+      "losses": 5,
+      "ties": 2,
+      "low": 0.24,
+      "high": 0.76,
+      "tasks_to_settle": 30,
+      "source": "selftest"
+    },
+    {
+      "skill": "bloat-sample",
+      "model": "demo-cheap-model",
+      "judge": "demo-judge-model",
+      "test_type": "single-call replay",
+      "verdict": "outside replay scope",
+      "wins": 0,
+      "losses": 0,
+      "ties": 0,
+      "low": null,
+      "high": null,
+      "tasks_to_settle": null,
+      "source": "selftest"
+    }
+  ],
+  "aa": [
+    {
+      "model": "demo-cheap-model",
+      "verdict": "Unsure",
+      "wins": 5,
+      "losses": 6,
+      "ties": 1
+    }
+  ],
+  "position_bias": 0.55
+}

@@ -34,18 +34,30 @@ Flags (each shows only when it applies):
 * Stale: the model changed since the verdict was made (``commands.stale_label``).
 * Judges split: the HARM judge flipped between answer orders on more than ``verdict.HARM_FLIP_MAX``
   of pairs, or the JOB judge picked the first-shown answer outside 40% to 60% of the time.
+* Same-model judge: the judge is the tested model (``same_judge``). Only when the caller passes
+  ``judge_model``; a judge of ``None`` means the active model judged, so it counts as the same.
+* Tool-driven (``tools``, from ``tool_driven_counts``): half or more of the tested uses went straight
+  to tool calls in the real session, or came back as an empty answer. The replay reads answers only,
+  so the shown strength is held at Plausible (Strong becomes Moderate, a strong lean becomes likely)
+  and the reason is added. The verdict itself does not change.
 
 Next step (first match wins):
 
 1. Run N more tasks: the headline is "not sure yet", or confidence is Weak. N is the stats
    "tasks to settle" estimate when it is a positive number, else 10.
-2. Consider archiving: the headline is "gets in the way".
-3. Consider trimming: "earns its keep" or "the model does this already", AND Heavy.
-4. Keep: "earns its keep" (not Heavy).
-5. Consider archiving: "the model does this already" (not Heavy).
+2. Ask again: "gets in the way" or "the model does this already", below Strong (Probable). One
+   run cannot tell no effect from a small effect, so archiving is never advised on a lean.
+3. Archive: the headline is "gets in the way" (Strong).
+4. Consider trimming: "earns its keep" or "the model does this already", AND Heavy.
+5. Keep: "earns its keep" (not Heavy).
+6. Archive: "the model does this already" (Strong, not Heavy).
+
+Shown wording: a "the model does this already" headline below Strong shows ``copy.UNCLEAR_WORD``
+("No clear difference yet") instead of Dead weight. The label and lean stay as they are.
 """
 
 # No ``from __future__ import annotations`` and no dataclasses: see stats.py (importlib-by-path).
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import copy as sb_copy
@@ -71,7 +83,11 @@ STRONG, MODERATE, WEAK = "Strong", "Moderate", "Weak"
 CONFIDENCE_LEVELS = (STRONG, MODERATE, WEAK)
 
 STEP_KEEP, STEP_TRIM, STEP_ARCHIVE, STEP_RUN_MORE = "keep", "trim", "archive", "run_more"
+STEP_ASK_AGAIN = "ask_again"
 FLAG_HEAVY, FLAG_FEW, FLAG_STALE, FLAG_SPLIT = "heavy", "few_tasks", "stale", "judges_split"
+FLAG_SAME_JUDGE = "same_judge"
+#: "Not passed" for ``judge_model`` (``None`` means no judge was set, which is not the same thing).
+_UNSET: Any = object()
 
 _NEUTRAL = (sb_verdict.MODEL_DOES_THIS_ALREADY, sb_verdict.NOT_SURE_YET)
 LEAN_CONFIDENCE = {sb_verdict.STRONG: STRONG, sb_verdict.LIKELY: MODERATE}
@@ -129,13 +145,50 @@ def judges_split(harm_flip_share: Optional[float], job_first_share: Optional[flo
     return False
 
 
+#: Stored placeholders that mean "no model recorded".
+_NO_MODEL = {"", "unknown", "unknown model", "none", "null", "active", "active model"}
+_TAG_RE = re.compile(r"\[[^\]]*\]$")
+_DATE_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def model_key(model: Any) -> Optional[str]:
+    """The one model id used to compare models everywhere (pool key, Stale, same-model judge):
+    trimmed and lower case, with a provider prefix (``anthropic/``), a bracketed context tag
+    (``[1m]``) and a trailing date (``-20261001`` or ``-2026-10-01``) removed. Nothing else is
+    removed, so ``gpt-5`` and ``gpt-5-mini`` stay different models. None when unknown."""
+    if not isinstance(model, str):
+        return None
+    m = model.strip().lower()
+    if m in _NO_MODEL:
+        return None
+    m = _TAG_RE.sub("", m).strip()
+    m = m.rsplit("/", 1)[-1].strip()
+    m = _DATE_RE.sub("", m)
+    return m or None
+
+
+def same_judge(subject: Any, judge: Any) -> bool:
+    """True when the judge is the tested model. No judge means the active model judged, so it counts
+    as the same; a set judge with no known subject does not."""
+    j = model_key(judge)
+    if j is None:
+        return True
+    return model_key(subject) == j
+
+
+def _same_judge_flag() -> Dict[str, str]:
+    return {"key": FLAG_SAME_JUDGE, "text": sb_copy.FLAG_SAME_JUDGE}
+
+
 def _norm(model: Any) -> Optional[str]:
     return model.strip() if isinstance(model, str) and model.strip() else None
 
 
 def build_flags(*, n_decisive: int, heavy: Optional[Mapping[str, Any]], verdict_model: Any, active_model: Any,
-                harm_flip_share: Optional[float], job_first_share: Optional[float]) -> List[Dict[str, str]]:
-    """Flags in a fixed order (Heavy, Few tasks, Stale, Judges split); each ``{"key", "text"}``."""
+                harm_flip_share: Optional[float], job_first_share: Optional[float],
+                judge_model: Any = _UNSET) -> List[Dict[str, str]]:
+    """Flags in a fixed order (Heavy, Few tasks, Stale, Judges split, Same-model judge); each
+    ``{"key", "text"}``."""
     from . import commands  # lazy: commands imports this module's output only at call time
     flags: List[Dict[str, str]] = []
     if isinstance(heavy, Mapping) and heavy.get("flag") is True and isinstance(heavy.get("text"), str):
@@ -147,10 +200,71 @@ def build_flags(*, n_decisive: int, heavy: Optional[Mapping[str, Any]], verdict_
                       "text": sb_copy.FLAG_STALE.format(tested=_norm(verdict_model), active=_norm(active_model))})
     if judges_split(harm_flip_share, job_first_share):
         flags.append({"key": FLAG_SPLIT, "text": sb_copy.FLAG_JUDGES_SPLIT})
+    if judge_model is not _UNSET and same_judge(verdict_model or active_model, judge_model):
+        flags.append(_same_judge_flag())
     return flags
 
 
+FLAG_TOOLS = "tool_driven"
+#: The tool-driven flag shows when this share of tested uses (or more) is tool-driven or empty.
+TOOL_DRIVEN_SHARE = 0.5
+_EMPTY_ANSWER = "EmptyAnswer"  # llm.EMPTY_ANSWER; not imported, so this module stays loadable by path
+
+
+def tool_driven_counts(pairs: Any) -> Dict[str, Any]:
+    """``{"tested", "tool_driven", "empty_answer", "count", "flag"}`` for one skill's pairs (one pair
+    per tested use). A use counts once when its real session went straight to tool calls (the pair's
+    ``tool_driven``, from the miner) or when either answer came back empty. Built-in question sets
+    have no real session, so only empty answers count there. ``flag`` is count >= half of tested."""
+    tested = tool = empty = count = 0
+    for p in pairs or []:
+        if not isinstance(p, Mapping):
+            continue
+        tested += 1
+        t = p.get("tool_driven") is True
+        arms = p.get("arms") if isinstance(p.get("arms"), Mapping) else {}
+        e = any(isinstance(a, Mapping) and a.get("error_type") == _EMPTY_ANSWER for a in arms.values())
+        tool += t
+        empty += e
+        count += t or e
+    return {"tested": tested, "tool_driven": tool, "empty_answer": empty, "count": count,
+            "flag": tested > 0 and count >= TOOL_DRIVEN_SHARE * tested - EPS}
+
+
+def _tools_flag(tools: Any) -> bool:
+    return isinstance(tools, Mapping) and tools.get("flag") is True
+
+
+def cap_lean(lean: Optional[Mapping[str, Any]], tools: Any) -> Optional[Dict[str, Any]]:
+    """The lean as shown: a strong lean becomes likely when the tool-driven flag is on, with
+    ``capped_from`` set. The verdict key never changes."""
+    if not lean:
+        return None
+    out = dict(lean)
+    if _tools_flag(tools) and out.get("strength") == sb_verdict.STRONG:
+        out["strength"] = sb_verdict.LIKELY
+        out["capped_from"] = sb_verdict.STRONG
+    return out
+
+
 # ── next step ────────────────────────────────────────────────────────────────
+
+#: The two headlines whose next step can be archiving, and only at Strong.
+_ARCHIVE_LABELS = (sb_verdict.GETS_IN_THE_WAY, sb_verdict.MODEL_DOES_THIS_ALREADY)
+
+
+def _unclear(label: Any, level: Any) -> bool:
+    """True for a "the model does this already" headline below Strong: shown as No clear difference yet."""
+    return label == sb_verdict.MODEL_DOES_THIS_ALREADY and level != STRONG
+
+
+def _shown_headline(head: Dict[str, Any], level: Any) -> Dict[str, Any]:
+    """The headline with the shown words for its confidence (see the module docstring)."""
+    if _unclear(head.get("label"), level):
+        head = {**head, "themed": sb_copy.UNCLEAR_WORD, "plain": sb_copy.UNCLEAR_MEANING,
+                "text": sb_copy.HEADLINE_FORMAT.format(themed=sb_copy.UNCLEAR_WORD, plain=sb_copy.UNCLEAR_MEANING)}
+    return head
+
 
 def next_step(label: str, level: str, is_heavy: bool, tasks_to_settle: Optional[int]) -> Dict[str, Any]:
     """The one next step, by the order in the module docstring. ``{"key", "text", "n"}``."""
@@ -158,6 +272,8 @@ def next_step(label: str, level: str, is_heavy: bool, tasks_to_settle: Optional[
         n = tasks_to_settle if isinstance(tasks_to_settle, int) and not isinstance(tasks_to_settle, bool) \
             and tasks_to_settle > 0 else DEFAULT_MORE_TASKS
         return {"key": STEP_RUN_MORE, "text": sb_copy.NEXT_RUN_MORE.format(n=n, tasks="task" if n == 1 else "tasks"), "n": n}
+    if label in _ARCHIVE_LABELS and level != STRONG:
+        return {"key": STEP_ASK_AGAIN, "text": sb_copy.NEXT_ASK_AGAIN, "n": None}
     if label == sb_verdict.GETS_IN_THE_WAY:
         return {"key": STEP_ARCHIVE, "text": sb_copy.NEXT_ARCHIVE, "n": None}
     if is_heavy:
@@ -178,13 +294,15 @@ def recommend(label: str, *, wins: int = 0, losses: int = 0, ties: int = 0,
               tasks_to_settle: Optional[int] = None, heavy: Optional[Mapping[str, Any]] = None,
               verdict_model: Any = None, active_model: Any = None,
               harm_flip_share: Optional[float] = None, job_first_share: Optional[float] = None,
-              scripted_harm: bool = False, lean: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+              scripted_harm: bool = False, lean: Optional[Mapping[str, Any]] = None,
+              judge_model: Any = _UNSET, tools: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Build the recommendation dict for one result.
 
     ``label`` is an internal ``verdict.LABELS`` value. ``low``/``high`` are the JOB Wilson interval on the
     decisive win rate; ``None`` for both means no decisive tasks. ``scripted_harm`` is True when a
     "gets in the way" headline rests on scripted hard evidence. Raises ``ValueError`` for an unknown
-    label; callers on the gateway path catch it.
+    label; callers on the gateway path catch it. ``judge_model``, when passed, adds the Same-model
+    judge flag if it is the tested model (``None``: the active model judged).
     """
     head = sb_copy.headline(label)
     if head is None:
@@ -192,18 +310,26 @@ def recommend(label: str, *, wins: int = 0, losses: int = 0, ties: int = 0,
     themed, plain, text = head
     n = int(wins or 0) + int(losses or 0)
     level = confidence(label, n, low, high, scripted_harm=scripted_harm)
+    lean = cap_lean(lean, tools)
     if lean:
         level = LEAN_CONFIDENCE.get(lean.get("strength"), WEAK)
+    capped = bool(lean and lean.get("capped_from"))
+    if _tools_flag(tools) and level == STRONG:
+        level, capped = MODERATE, True
     if low is None or high is None or n == 0:
         why = sb_copy.CONFIDENCE_WHY_NONE
     else:
         why = sb_copy.CONFIDENCE_WHY.format(n=n, low=_pct(low), high=_pct(high))
+    if capped:
+        why += sb_copy.CONFIDENCE_WHY_TOOL_CAP.format(word=sb_copy.CONFIDENCE_WORDS[MODERATE])
     flags = build_flags(n_decisive=n, heavy=heavy, verdict_model=verdict_model, active_model=active_model,
-                        harm_flip_share=harm_flip_share, job_first_share=job_first_share)
+                        harm_flip_share=harm_flip_share, job_first_share=job_first_share, judge_model=judge_model)
+    if _tools_flag(tools):
+        flags.append({"key": FLAG_TOOLS, "text": sb_copy.FLAG_TOOL_DRIVEN})
     is_heavy = any(f["key"] == FLAG_HEAVY for f in flags)
     return {
-        "headline": {"label": label, "themed": themed, "plain": plain, "text": text,
-                     "tone": sb_copy.VERDICT_TONE.get(label, "outline")},
+        "headline": _shown_headline({"label": label, "themed": themed, "plain": plain, "text": text,
+                                     "tone": sb_copy.VERDICT_TONE.get(label, "outline")}, level),
         "confidence": {"level": level, "text": sb_copy.CONFIDENCE_WORDS[level], "why": why},
         "flags": flags,
         "next_step": next_step(label, level, is_heavy, tasks_to_settle),
@@ -213,7 +339,8 @@ def recommend(label: str, *, wins: int = 0, losses: int = 0, ties: int = 0,
                     "low": low, "high": high,
                     "width": None if low is None or high is None else round(high - low, 4),
                     "tasks_to_settle": tasks_to_settle, "harm_flip_share": harm_flip_share,
-                    "job_first_share": job_first_share, "scripted_harm": bool(scripted_harm)},
+                    "job_first_share": job_first_share, "scripted_harm": bool(scripted_harm),
+                    **({"tools": dict(tools)} if isinstance(tools, Mapping) else {})},
     }
 
 
@@ -255,6 +382,20 @@ def label_from_run(run: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _stored_tools(run: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The tool-driven counts a stored row carries (``tools``, or the stored recommendation's
+    numbers), or ``{"flag": True}`` when only the stored flag survives. ``None`` when unflagged."""
+    stored = run.get("recommendation") if isinstance(run.get("recommendation"), Mapping) else {}
+    numbers = stored.get("numbers") if isinstance(stored.get("numbers"), Mapping) else {}
+    for tools in (run.get("tools"), numbers.get("tools")):
+        if isinstance(tools, Mapping):
+            return dict(tools)
+    flags = stored.get("flags") if isinstance(stored.get("flags"), list) else []
+    if any(isinstance(f, Mapping) and f.get("key") == FLAG_TOOLS for f in flags):
+        return {"flag": True}
+    return None
+
+
 def from_run(run: Mapping[str, Any], *, active_model: Any = None) -> Optional[Dict[str, Any]]:
     """``recommend`` for a stored run dict (a ``verdicts.json`` row). ``None`` when the row lacks a label
     or counts; never raises."""
@@ -270,7 +411,8 @@ def from_run(run: Mapping[str, Any], *, active_model: Any = None) -> Optional[Di
                          tasks_to_settle=run.get("tasks_to_settle"), heavy=run.get("heavy"),
                          verdict_model=run.get("model"), active_model=active_model,
                          harm_flip_share=run.get("harm_flip_share"), job_first_share=run.get("job_first_share"),
-                         scripted_harm=bool(run.get("scripted_harm")))
+                          scripted_harm=bool(run.get("scripted_harm")), judge_model=run.get("judge"),
+                          tools=_stored_tools(run))
     except Exception:
         return None
 
@@ -302,9 +444,47 @@ def lean_of(rec: Mapping[str, Any]) -> Dict[str, Any]:
     return {"verdict": old or sb_verdict.NOT_ENOUGH, "strength": None}
 
 
-def clean(rec: Any) -> Optional[Dict[str, Any]]:
+def shown_step(label: Any, level: Any, step: Mapping[str, Any]) -> Dict[str, Any]:
+    """The next step to show for a stored result (S1). A "gets in the way" or "the model does this
+    already" headline below Strong (Probable) shows "Ask again" for any stored step except
+    "run more tasks", as a fresh result would (``next_step`` rule 2). ``level`` in any case."""
+    below = str(level or "").strip().lower() != STRONG.lower()
+    if label in _ARCHIVE_LABELS and below and step.get("key") != STEP_RUN_MORE:
+        return {"key": STEP_ASK_AGAIN, "text": sb_copy.NEXT_ASK_AGAIN, "n": None}
+    return dict(step)
+
+
+def _is_strong(level: Any) -> bool:
+    return str(level or "").strip().lower() == STRONG.lower()
+
+
+def unclear_shown(label: Any, level: Any) -> bool:
+    """True when a stored "the model does this already" result below Strong is shown as No clear
+    difference yet. ``level`` in any case (the report reads it lower-cased)."""
+    return label == sb_verdict.MODEL_DOES_THIS_ALREADY and not _is_strong(level)
+
+
+def honest_step(label: Any, level: Any, step: Mapping[str, Any]) -> Dict[str, Any]:
+    """The step to show for a stored result: archiving only after a Strong (Probable) result, then
+    ``shown_step``. Shared by ``_honest`` and the report."""
+    if step.get("key") == STEP_ARCHIVE and not _is_strong(level):
+        step = {"key": STEP_ASK_AGAIN, "text": sb_copy.NEXT_ASK_AGAIN, "n": None}
+    return shown_step(label, level, step)
+
+
+def _honest(out: Dict[str, Any]) -> Dict[str, Any]:
+    """A recommendation saved before the shown-wording rules: below Strong, no Dead weight headline
+    and no step a fresh result would not give (``honest_step``). The label and lean stay."""
+    level = out["confidence"].get("level")
+    out["headline"] = _shown_headline(out["headline"], level)
+    out["next_step"] = honest_step(out["headline"].get("label"), level, out["next_step"])
+    return out
+
+
+def clean(rec: Any, row: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Whitelist a stored recommendation for the API: known keys only, strings as strings. ``None`` when
-    malformed. Stored data is never trusted to carry markup or extra keys."""
+    malformed. Stored data is never trusted to carry markup or extra keys. With its stored ``row``,
+    the Same-model judge flag is set from the row's ``model`` and ``judge``."""
     try:
         if not isinstance(rec, Mapping):
             return None
@@ -322,15 +502,21 @@ def clean(rec: Any) -> Optional[Dict[str, Any]]:
         if not (isinstance(out["headline"]["text"], str) and isinstance(out["confidence"]["text"], str)
                 and isinstance(out["next_step"]["text"], str)):
             return None
-        return out
+        if isinstance(row, Mapping):
+            out["flags"] = [f for f in out["flags"] if f["key"] != FLAG_SAME_JUDGE]
+            if same_judge(row.get("model"), row.get("judge")):
+                out["flags"].append(_same_judge_flag())
+        return _honest(out)
     except Exception:
         return None
 
 
 __all__ = [
     "STRONG", "MODERATE", "WEAK", "CONFIDENCE_LEVELS", "STEP_KEEP", "STEP_TRIM", "STEP_ARCHIVE", "STEP_RUN_MORE",
+    "STEP_ASK_AGAIN", "FLAG_SAME_JUDGE", "same_judge", "model_key",
     "FLAG_HEAVY", "FLAG_FEW", "FLAG_STALE", "FLAG_SPLIT", "STRONG_MIN_TASKS", "MODERATE_MIN_TASKS",
     "STRONG_MARGIN", "STRONG_WIDTH", "MODERATE_WIDTH", "FEW_TASKS_BELOW", "FIRST_SHARE_BAND", "DEFAULT_MORE_TASKS",
     "confidence", "judges_split", "build_flags", "next_step", "recommend", "from_cell", "from_run", "label_from_run",
-    "format_text", "clean", "lean_of", "LEAN_CONFIDENCE",
+    "format_text", "clean", "lean_of", "LEAN_CONFIDENCE", "shown_step", "honest_step", "unclear_shown",
+    "FLAG_TOOLS", "TOOL_DRIVEN_SHARE", "tool_driven_counts", "cap_lean",
 ]

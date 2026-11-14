@@ -6,10 +6,12 @@ Tool schemas: what the model reads to decide when to call skilluminati tools."""
 ESTIMATE = {
     "name": "skilluminati_estimate",
     "description": (
-        "skilluminati: estimate how many prompt tokens each installed skill adds to every "
-        "turn (its index line) and on load (its SKILL.md), converted to an approximate cost. "
-        "Use when the user asks which skills are expensive or wants to trim their skill set. "
-        "Read-only, no model calls; numbers are estimates (chars/4, list input price)."
+        "Token cost of each installed skill, per turn and per load. "
+        "Skilluminati counts the prompt tokens each skill adds to every turn (its index line) and "
+        "each time it is loaded (its SKILL.md), converted to an approximate cost. Use when the "
+        "user asks which skills are expensive, cost the most to keep loaded, or wants to trim "
+        "their skill set. Read-only, no model calls; numbers are estimates (chars/4, list input "
+        "price). Whether a skill actually helps is skilluminati_result."
     ),
     "parameters": {
         "type": "object",
@@ -35,11 +37,14 @@ ESTIMATE = {
 RESULT = {
     "name": "skilluminati_result",
     "description": (
-        "skilluminati: return the report of a finished Skilluminati run (a skill verdict or the "
-        "self-test) as markdown, read from disk. Call it when the user asks for their Skilluminati "
-        "result, what Skilluminati said about a skill, or how the self-test went. Show the report to "
-        "the user exactly as returned, with its table. Do not add a verdict, score or advice of your "
-        "own. Read-only, no model calls."
+        "Skilluminati's tested verdict on whether a skill helps or hurts your answers. "
+        "Returns the saved report of a finished Skilluminati run (a skill verdict or the "
+        "self-test) as markdown, read from disk. Call it when the user asks whether a skill is "
+        "worth keeping, pulling its weight, helping or hurting, what Skilluminati said about a "
+        "skill, or how the self-test went. Show the report to the user exactly as returned, with "
+        "its table. Do not add a verdict, score or advice of your own. If no run exists for the "
+        "skill, say so and offer /skilluminati <skill> to test it. Read-only, no model calls. "
+        "For what a skill costs in tokens, use skilluminati_estimate."
     ),
     "parameters": {
         "type": "object",

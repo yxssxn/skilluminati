@@ -184,9 +184,10 @@ def position_bias(first_picks: int, total: int) -> PositionBias:
 class AANoise:
     """Summary of an A/A run: the same arm judged against itself.
 
-    A clean judge gives a decisive win rate near 0.5 with the interval covering 0.5.
-    ``noisy`` is True when the interval excludes 0.5, meaning the judge is finding a
-    difference between two identical arms.
+    ``n_decisive`` (wins + losses) is the number of firm picks: pairs where the judge named the
+    same winner in both orders between two identical arms. The report shows the firm-pick share,
+    pooled across runs (``noise.py``). The old ``noisy`` flag (interval excludes 0.5) is gone: on a
+    handful of pairs it could not fire, and it measured direction, which is symmetric here.
     """
 
     n: int
@@ -198,7 +199,6 @@ class AANoise:
     low: float
     high: float
     tie_share: Optional[float]  # None when n == 0
-    noisy: bool
 
 
 def _token(result) -> str:
@@ -240,7 +240,6 @@ def aa_noise(results: Iterable, z: float = Z_95) -> AANoise:
         low=low,
         high=high,
         tie_share=(ties / n) if n else None,
-        noisy=bool(nd) and _classify(low, high) != UNSURE,
     )
 
 

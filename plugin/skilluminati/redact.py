@@ -13,6 +13,9 @@ Redactor for mined task text. Pure Python, stdlib only.
 * ``[PHONE]``  AU (``04xx xxx xxx``, ``(02) xxxx xxxx``, ``+61 ...``, ``1300``/``1800``) and
                international (``+cc ...``) shapes.
 * ``[MONEY]``  ``$1,234.56``, ``A$5k``, ``AUD 2,000``, ``USD 1.5m``, ``2,000 AUD``.
+* ``~``        the account name in home-folder paths: ``/Users/alice/x``, ``/home/alice/x`` and
+               ``C:\\Users\\alice\\x`` become ``~/x`` (``~\\x``). Shared folders (``/Users/Shared``,
+               ``/home/linuxbrew``) are kept. Counted as ``PATH``.
 * ``[NAME]``   names from the optional deny-list (``$HERMES_HOME/plugin-data/skilluminati/names.txt``;
                one per line, case-insensitive; when it is absent no listed names are removed and
                the run plan notes this) plus capitalised names in greetings
@@ -30,7 +33,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional
 
-PLACEHOLDERS = ("KEY", "URL", "EMAIL", "PHONE", "MONEY", "NAME")
+PLACEHOLDERS = ("KEY", "URL", "EMAIL", "PHONE", "MONEY", "PATH", "NAME")
 
 def hermes_home() -> Path:
     """Hermes's home folder for the active profile, from Hermes itself (get_hermes_home).
@@ -117,6 +120,13 @@ _NOT_NAMES = frozenset({
 
 # ── deny-list ────────────────────────────────────────────────────────────────
 
+#: The account part of a home-folder path. Shared folders are not anyone's name, so they stay.
+HOME_PATH_RE = re.compile(
+    r"(?<![\w.:/\\-])(?:/Users/|/home/|[A-Za-z]:\\Users\\)"
+    r"(?!(?:Shared|linuxbrew|Public|Default)(?![\w.-]))[\w.-]+(?![\w.-])"
+)
+
+
 def load_names(path: str | os.PathLike[str] | None = None) -> list[str]:
     """Names from the deny-list file, longest first, blank lines and ``#`` comments ignored.
     An absent file yields an empty list."""
@@ -192,6 +202,7 @@ def redact(
     out = _sub(EMAIL_RE, "[EMAIL]", out, counts, "EMAIL")
     out = _sub(PHONE_RE, "[PHONE]", out, counts, "PHONE")
     out = _sub(MONEY_RE, "[MONEY]", out, counts, "MONEY")
+    out = _sub(HOME_PATH_RE, "~", out, counts, "PATH")
     deny = list(names) if names is not None else load_names(names_file)
     pat = _names_pattern(deny)
     if pat is not None:

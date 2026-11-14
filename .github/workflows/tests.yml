@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pytest and FastAPI
+        # FastAPI so the dashboard route test runs instead of skipping
+        run: python -m pip install pytest fastapi
+      - name: Run the public tests
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: python -m pytest -q $(grep -v '^#' tests/PUBLIC.txt)

@@ -17,6 +17,11 @@ For every load we produce one task dict:
   ``system_prompts`` row matching ``sessions.system_prompt_hash``), else ``None``.
 * ``flags``: ``tool_dependent`` (a non-skill tool was called between the user turn and the
   final answer) and ``multi_turn`` (more than one real user turn preceded the load).
+* ``tool_driven``: the agent's next move after the load was one or more tool calls, and neither the
+  message text nor any content-carrying argument (``CONTENT_ARG_KEYS``: a file's content, a
+  message, a body and the like) has 200 or more characters. Command and code arguments
+  (``CODE_ARG_KEYS``: a shell command, code, a query, a path) never count as an answer, however
+  long. See ``_next_move_tool_driven``. The replay reads answers only; the result flags it.
 * ``kept`` / ``drop_reason``: tool-dependent and multi-turn tasks are dropped by default;
   ``no_answer`` (session ended before a final answer) and ``duplicate_load`` (same skill loaded
   again in the same turn) are the other two reasons.
@@ -339,6 +344,7 @@ def _tasks_for_session(
                 system_prompt_resolved = True
 
             tool_dependent, answered = _scan_turn(msgs, i)
+            tool_driven = _next_move_tool_driven(msgs, i)
             multi_turn = user_turns_seen > 1
             duplicate = skill in seen_in_turn
             seen_in_turn.add(skill)
@@ -381,6 +387,7 @@ def _tasks_for_session(
                 "system_prompt_hash": session["system_prompt_hash"],
                 "user_turns_before_load": user_turns_seen,
                 "flags": {"tool_dependent": tool_dependent, "multi_turn": multi_turn},
+                "tool_driven": tool_driven,
                 "kept": drop_reason is None,
                 "drop_reason": drop_reason,
             }
@@ -894,6 +901,62 @@ def _scan_turn(msgs: list[sqlite3.Row], load_index: int) -> tuple[bool, bool]:
         elif row["role"] == "tool" and row["tool_name"] and row["tool_name"] not in SKILL_TOOLS:
             tool_dependent = True
     return tool_dependent, answered
+
+
+#: Text shorter than this, beside a tool call, is a preamble ("Checking the board."), not an answer.
+TOOL_DRIVEN_TEXT_MAX = 200
+
+#: R6b: tool-call argument keys that carry an answer (a file written, a message sent). A string at
+#: or under one of these keys (nested values too) counts like the message text. Matched without case.
+CONTENT_ARG_KEYS = frozenset({"content", "text", "message", "body", "new_string", "file_text", "markdown",
+                              "html", "caption", "summary"})
+#: Command and code arguments: never an answer, however long, even inside a content key.
+CODE_ARG_KEYS = frozenset({"command", "code", "script", "query", "path"})
+
+
+def _next_move_tool_driven(msgs: list[sqlite3.Row], load_index: int) -> bool:
+    """True when the agent's next move after the load at ``msgs[load_index]`` was one or more tool
+    calls, and neither the message text nor any content-carrying argument (``_content_strings``)
+    reaches ``TOOL_DRIVEN_TEXT_MAX`` characters, measured the same way on both (R6b). Command and
+    code arguments never count. Tool results and assistant rows that only open more skills are
+    skipped; a real user turn, or the end of the session, before any next move means False. A replay
+    reads answers only, so a skill used this way is tested on something it did not do in real use."""
+    for row in msgs[load_index + 1:]:
+        if row["_compressed_summary"] or row["role"] == "tool":
+            continue
+        if _is_real_user_turn(row):
+            return False
+        if row["role"] != "assistant":
+            continue
+        calls = _parse_tool_calls(row["tool_calls"])
+        text = _text_of(row["content"]).strip()
+        others = [c for c in calls if c["name"] not in SKILL_TOOLS]
+        if calls and not others and len(text) < TOOL_DRIVEN_TEXT_MAX:
+            continue  # only opened more skills: look at the move after
+        # R6b: an answer delivered through a tool (a file write, a message send) is still an answer
+        # the text replay can judge, so a long content argument counts like long text. A long shell
+        # command or piece of code does not.
+        prose = any(len(v) >= TOOL_DRIVEN_TEXT_MAX for c in others for v in _content_strings(c["arguments"]))
+        return bool(others) and len(text) < TOOL_DRIVEN_TEXT_MAX and not prose
+    return False
+
+
+def _content_strings(value: Any, inside: bool = False) -> list[str]:
+    """The stripped strings in a tool call's arguments that sit at or under a ``CONTENT_ARG_KEYS``
+    key (nested dicts and lists included). Anything under a ``CODE_ARG_KEYS`` key is left out."""
+    if isinstance(value, str):
+        return [value.strip()] if inside else []
+    if isinstance(value, dict):
+        out: list[str] = []
+        for k, v in value.items():
+            key = str(k).lower()
+            if key in CODE_ARG_KEYS:
+                continue
+            out += _content_strings(v, inside or key in CONTENT_ARG_KEYS)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _content_strings(v, inside)]
+    return []
 
 
 def _sessions_for_skill(conn: sqlite3.Connection, skill: str, cols: str) -> list[sqlite3.Row]:
