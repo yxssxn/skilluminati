@@ -71,3 +71,8 @@ tests/test_w3py_lost_wording.py
 tests/test_w3_home_paths.py
 tests/test_w3_unjudged.py
 tests/test_w3_ui.py
+tests/test_v021_interrupted.py
+tests/test_v021_dev_pins.py
+tests/test_v021_tool_driven_copy.py
+tests/test_v021_lost_clean.py
+tests/test_v021_judge_docs.py

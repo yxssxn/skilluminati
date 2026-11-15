@@ -21,7 +21,7 @@ hermes plugins install yxssxn/skilluminati/plugin
 hermes plugins enable skilluminati
 ```
 
-This installs v0.2.0 from this repo. Hermes calls it an unreviewed source because it does not come from the Hermes catalogue. The catalogue copy (`hermes plugins install skilluminati`) stays on v0.1.0, the hackathon entry; see [CHANGELOG.md](CHANGELOG.md).
+This installs v0.2.1 from this repo. Hermes calls it an unreviewed source because it does not come from the Hermes catalogue. The catalogue copy (`hermes plugins install skilluminati`) stays on v0.1.0, the hackathon entry; see [CHANGELOG.md](CHANGELOG.md).
 
 In Hermes Desktop, also turn on **Capabilities -> Plugins -> Skilluminati** to add the Skilluminati page (the book icon in the sidebar). Then open a new chat and type:
 
@@ -114,7 +114,7 @@ On the author's machine, over 11 finished runs, the Owl made a firm pick **37 of
 - **It never edits or deletes a skill.**
 - **It reads your history read-only.** Run folders keep redacted copies of the tasks, readable only by you (files 0600 in a 0700 folder). Redaction works by pattern plus your optional names list (`names.txt`) and is best effort: a password or secret that does not look like a key can slip through. Folders made by v0.1 hold unredacted copies (see CHANGELOG).
 - **One model call at a time**, in the background, so you can keep chatting.
-- **Data goes to your active provider, and to a judge's provider only if you set one.** Each task (the chat up to that point, with its system prompt, so your memory and profile, and tool output) goes to your active provider, where your chats already go. If you set a judge (`judge.provider` and `judge.model`), the redacted request and both answers also go to its provider. Before anything leaves, emails, phone numbers, key-shaped strings, URLs carrying tokens and money amounts are blanked out, the account name in most home-folder paths becomes `~`, and names only if you list them, one per line, in `HERMES_HOME/plugin-data/skilluminati/names.txt`.
+- **Data goes to your active provider, and to a judge's provider only if you set one.** Each task (the chat up to that point, with its system prompt, so your memory and profile, and tool output) goes to your active provider, where your chats already go. If you set a judge (`judge.provider` and `judge.model`), the redacted request and both answers also go to its provider. If you keep a model allow-list for the plugin (`plugins.entries.skilluminati.llm.allowed_models`), the judge model must be on it, or Hermes refuses the call ([plugin/README.md](plugin/README.md) has an example). Before anything leaves, emails, phone numbers, key-shaped strings, URLs carrying tokens and money amounts are blanked out, the account name in most home-folder paths becomes `~`, and names only if you list them, one per line, in `HERMES_HOME/plugin-data/skilluminati/names.txt`.
 - **It spends tokens, but only when you ask.** A run on one skill is up to 64 model calls (12 tasks plus 4 same-vs-same checks, 4 calls each). A model call is one request to your model, billed like any other (a long replayed chat costs more). A run starts only in a local session, never from a scheduled job (cron) or a messaging gateway such as Telegram.
 - **Results stay on your machine**, in `HERMES_HOME/plugin-data/skilluminati/` (`HERMES_HOME` is your Hermes folder, usually `~/.hermes`). Delete that folder to remove them. There is no telemetry.
 - **It adds one line to every prompt.** Hermes keeps plugin tools behind its tool search, so the plugin ships a short skill, `skilluminati:skilluminati`. When you ask whether a skill is worth keeping, your agent reads the saved verdict instead of guessing. The line costs about 25 tokens a turn (characters divided by 4). Disable the plugin to remove it.
@@ -133,7 +133,7 @@ python -m pip install pytest fastapi
 python -m pytest -q $(grep -v '^#' tests/PUBLIC.txt)
 ```
 
-On a fresh copy of this repo, with FastAPI installed as CI does and Node 20.19 or newer on the PATH, that gives 815 passed and 4 skipped. Without Node, the three tests that run the page script also skip: 812 passed and 7 skipped. The other 4 need development files that are not in this repo.
+On a fresh copy of this repo, with FastAPI installed as CI does and Node 20.19 or newer on the PATH, that gives 849 passed and 4 skipped. Without Node, the three tests that run the page script also skip: 846 passed and 7 skipped. The other 4 need development files that are not in this repo.
 
 ## Credits and licences
 

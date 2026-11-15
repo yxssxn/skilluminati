@@ -190,8 +190,10 @@ class EscapedOnThePage(unittest.TestCase):
             row = {"skill": SKILL, "run": RUN_B, "wins": 2, "losses": 5, "ties": 0}
             reasons = report.page_result(row, d.parent)["working"]["lost_reasons"] + \
                 report.lost_reasons(d, SKILL, limit=10)
-        hit = [r for r in reasons if "<script>" in r]
-        self.assertTrue(hit, "the fixture reason with markup reaches the payload")
+        # v0.2.1: markup is stripped before it is shown (test_v021_lost_clean); the words remain.
+        self.assertFalse([r for r in reasons if "<script>" in r or "</script>" in r])
+        hit = [r for r in reasons if "alert(1)" in r]
+        self.assertTrue(hit, "the fixture reason with markup reaches the payload, cleaned")
         # The payload is JSON data, not HTML: the page renders it as a React text child.
         payload = json.dumps({"lost_reasons": hit})
         self.assertEqual(json.loads(payload)["lost_reasons"], hit)

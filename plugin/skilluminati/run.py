@@ -483,6 +483,15 @@ def announce(run_dir: Path, session_id: str, kind: str, skill: Optional[str], li
         return False
 
 
+def close_interrupted() -> None:
+    """Mark run folders a Hermes restart cut off (report.mark_interrupted). Never raises."""
+    try:
+        from . import report
+        report.mark_interrupted()
+    except Exception:
+        logger.debug("skilluminati: interrupted runs not marked", exc_info=True)
+
+
 def launch(ctx: Any, label: str, guard: sb_llm.CommandGuard, work: Callable[[], Any],
            first_line: str, start_line: str, *, session_id: str = "", kind: str = "verdict",
            skill: Optional[str] = None, background: bool = False) -> str:
@@ -494,6 +503,7 @@ def launch(ctx: Any, label: str, guard: sb_llm.CommandGuard, work: Callable[[], 
     done = _claim(label, guard)
     if done is None:
         return busy_text() or "Another Skilluminati run is going."
+    close_interrupted()  # nothing else runs in this process now; live.json guards other processes
     # Desktop and the TUI always run in the background: a run held inside the command froze the whole
     # window. The popup is posted from the background thread, never from here,
     # because posting can wait up to 30 s for the gateway and the window waits with it.
@@ -937,8 +947,10 @@ def last_command(args: list[str]) -> str:
     """``/skilluminati last [skill|selftest]``: the latest finished report, plain lines for the terminal."""
     from . import report
     want = args[0] if args else None
-    folder = report.find_run(skill=want)
     going = active_status()
+    if going is None:
+        close_interrupted()
+    folder = report.find_run(skill=want)
     lead = f"A {going['label']} is still going: {going['used']} of {going['cap']} calls.\n" if going else ""
     if folder is None:
         return lead + (f"No finished Skilluminati run for '{want}'." if want else "No finished Skilluminati run yet.")

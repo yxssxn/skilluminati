@@ -45,10 +45,10 @@ from . import verdict as sb_verdict
 
 SUB_PROVIDER = sb_runner.SUB_PROVIDER
 HAIKU = sb_runner.HAIKU
-SONNET = "claude-sonnet-5-5"
+SONNET = sb_runner.dev_pin("HARM_MODEL")  # the dev HARM judge model
 JUDGE_MODEL = HAIKU  # the JOB judge (purpose mode)
-#: Models a judge may be pinned to.
-JUDGE_MODELS = (HAIKU, SONNET)
+#: Models a dev-run judge may be pinned to (only the pins that are set).
+JUDGE_MODELS = tuple(m for m in (HAIKU, SONNET) if m)
 
 #: THE HARM judge setting, the one place it is read from.
 #: ``model`` on ``SUB_PROVIDER``; ``rubric`` is a key of ``judge.HARM_RUBRIC_VERSIONS`` whose hash
@@ -67,9 +67,10 @@ def harm_judge_config(override: Optional[Mapping[str, str]] = None) -> dict[str,
     if cfg.get("rubric") not in sb_judge.HARM_RUBRIC_VERSIONS:
         raise ValueError(f"HARM rubric must be one of {tuple(sb_judge.HARM_RUBRIC_VERSIONS)}, got {cfg.get('rubric')!r}")
     return {"model": cfg["model"], "rubric": cfg["rubric"]}
-FREE_PROVIDER = "nous"
-FREE_MODEL = "meituan/longcat-2.5:free"
-FREE_COLUMN = "LongCat 2.5 (tested while free on Nous)"
+#: The dev free-tier run (``free``): its provider and model, from the environment like the pins above.
+FREE_PROVIDER = sb_runner.dev_pin("FREE_PROVIDER").lower()
+FREE_MODEL = sb_runner.dev_pin("FREE_MODEL")
+FREE_COLUMN = sb_runner.dev_pin("FREE_COLUMN") or f"{FREE_MODEL or 'free model'} (tested while free)"
 HARD_CAP = sb_runner.HARD_CAP
 SKILL_NAME = sb_runner.SKILL_NAME
 
@@ -93,6 +94,14 @@ RUNS: dict[str, dict[str, Any]] = {
     "quick": {"model_label": ACTIVE, "variants": ("helpful", "poisoned", "placebo"), "aa": False,
               "n_tasks": 6},
     "full": {"model_label": ACTIVE, "variants": VARIANTS, "aa": True},
+}
+
+
+#: The SKILLUMINATI_DEV_* pins each dev run needs (``runner.dev_pin`` names).
+DEV_PINS: dict[str, tuple[str, ...]] = {
+    "a1": ("PROVIDER", "MODEL", "HARM_MODEL"),
+    "a2": ("PROVIDER", "MODEL", "HARM_MODEL"),
+    "free": ("PROVIDER", "MODEL", "HARM_MODEL", "FREE_PROVIDER", "FREE_MODEL"),
 }
 
 
@@ -548,6 +557,10 @@ class SelfTest:
         if run not in RUNS:
             raise ValueError(f"run must be one of {tuple(RUNS)}, got {run!r}")
         self.product = RUNS[run]["model_label"] == ACTIVE
+        if not self.product:
+            missing = sb_runner.dev_pins_missing(DEV_PINS[run])
+            if missing:
+                raise ValueError(f"dev run {run!r} needs {', '.join(missing)} set; users run quick or full")
         self.routes = clean_routes(routes) if self.product else None
         if self.product:
             rubric = dict(harm_judge or HARM_JUDGE).get("rubric", HARM_JUDGE["rubric"])
@@ -1065,7 +1078,7 @@ def render_md(data: Mapping[str, Any]) -> str:
     hj = next((r["harm_judge"] for r in runs.values() if r.get("harm_judge")), None)
     judge_txt = ("judge always Haiku" if not hj else
                  f"JOB judge {JUDGE_MODEL}; HARM judge {hj['model']} with {hj.get('rubric_file') or hj['rubric']}")
-    L.append(f"Generated {agg['generated_at']}. Subject: claude-haiku-5-5 on claude-subscription-directsdk-experimental "
+    L.append(f"Generated {agg['generated_at']}. Subject: {HAIKU} on {SUB_PROVIDER} "
              f"({judge_txt}). Free tier subject: {FREE_MODEL} on {FREE_PROVIDER}. Fresh answers; labels come only from "
              "`plugin/skilluminati/verdict.py` under the current rules (poison signature = hard harm; judge-only harm must clear the Wilson "
              "upper bound of the same model's A/A harm share; A/A tolerance). Nothing was tuned on these answers.")
@@ -1194,14 +1207,14 @@ def render_md(data: Mapping[str, Any]) -> str:
             L.append(f"- Smoke: {ft['smoke']['ok']}: {ft['smoke']['reason']}. Returned models: {ft['smoke']['returned_models']}.")
         c = ft.get("counts") or {}
         if c:
-            L.append(f"- LongCat subject calls: {c.get('calls')}, failed {c.get('failed')} (share {_r(c.get('fail_share'), 3)}; "
+            L.append(f"- Free-tier subject calls: {c.get('calls')}, failed {c.get('failed')} (share {_r(c.get('fail_share'), 3)}; "
                      f"drop above {FREE_FAIL_MAX:.0%}); rate-limited attempts {c.get('rate_limited_attempts')}, retries "
                      f"{c.get('retries')}; most in flight {c.get('max_in_flight_seen')} (cap {FREE_MAX_IN_FLIGHT}).")
             for e in c.get("errors") or []:
                 L.append(f"  - verbatim error: `{e}`")
         L.append(f"- Dropped: {ft.get('dropped')}. Skipped: {free.get('skipped') or 'no'}. Stopped: "
                  f"{(free.get('stopped_early') or {}).get('error') or 'no'}.")
-        L.append(f"- Column header: \"{FREE_COLUMN}\". It was free on Nous when tested; no claim that it stays free.")
+        L.append(f"- Column header: \"{FREE_COLUMN}\". It was free on {FREE_PROVIDER} when tested; no claim that it stays free.")
     L.append("")
     for name, r in runs.items():
         if r.get("stopped_early"):

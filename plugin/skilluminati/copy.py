@@ -138,6 +138,11 @@ NEXT_NOTE = "Skilluminati never deletes or edits a skill."
 
 # ── end of a run (Desktop) ───────────────────────────────────────────────────
 
+#: A run cut off by a Hermes restart: the line added to its progress.log and its NOTE.txt text.
+INTERRUPTED_STOP = "[stop] Interrupted: Hermes stopped during this run"
+INTERRUPTED_NOTE = ("This run was cut off: Hermes stopped while it was going. Nothing was saved from it, "
+                    "and no result was stored. Run the test again to get a result.")
+
 #: The line the Desktop half sends to the agent, on the user's behalf, when a run ends. It names the
 #: tool so a host that loads tools on demand finds it. ``{what}`` = the skill name or "the self-test".
 SHOW_RESULT_PROMPT = "Show my Skilluminati result for {what} (skilluminati_result tool)."
@@ -341,9 +346,8 @@ STALE_TIP = "Tested on a different model from the one a new test would use. Ask 
 SKILL_CHANGED_TAG = "Skill changed"
 SKILL_CHANGED_TIP = FLAG_SKILL_CHANGED + ". Ask again to test this version."
 TOOL_DRIVEN_TAG = "Tool-driven"
-TOOL_DRIVEN_TIP = FLAG_TOOL_DRIVEN
+TOOL_DRIVEN_TIP = FLAG_TOOL_DRIVEN  # also the tool-driven line in the working
 WORKING_PARTIAL = "This run stopped early, so the result is partial."
-WORKING_TOOL_DRIVEN = FLAG_TOOL_DRIVEN
 WORKING_NONE = "No task-by-task detail was saved for this result."
 LOAD_ERROR = "Could not load the page data"
 LOAD_ERROR_HINT = "The page's backend loads after the plugin is enabled and the gateway has restarted."

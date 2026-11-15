@@ -410,10 +410,10 @@ class RunWiringTests(unittest.TestCase):
         r = report.page_result(row)
         self.assertEqual(r["strength"], "likely")
         self.assertTrue(r["working"]["tool_driven"])
-        self.assertEqual(copy.page_copy()["working_tool_driven"], copy.FLAG_TOOL_DRIVEN)
+        self.assertEqual(copy.page_copy()["tool_driven_tip"], copy.FLAG_TOOL_DRIVEN)
         js = (ROOT / "plugin" / "desktop" / "plugin.js").read_text(encoding="utf-8")
         self.assertIn("w.tool_driven", js)
-        self.assertIn("c.working_tool_driven", js)
+        self.assertIn("lines.push(str(c.tool_driven_tip))", js)
         plain = report.page_result({**row, "recommendation": self.base["recommendation"]})
         self.assertFalse(plain["working"]["tool_driven"])
 

@@ -87,8 +87,8 @@ class FakeLlm:
 
 
 TRUST_OK = {"allow_provider_override": True, "allow_model_override": True,
-            "allowed_providers": ["claude-subscription-directsdk-experimental", "nous"],
-            "allowed_models": ["claude-haiku-5-5", "meituan/longcat-2.5:free"]}
+            "allowed_providers": [runner.SUB_PROVIDER, selftest.FREE_PROVIDER],
+            "allowed_models": [runner.HAIKU, selftest.FREE_MODEL]}
 
 
 def _run(llm, run, tmp, n=3, trust=None):
@@ -106,8 +106,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(free["batch"], 216)
         self.assertEqual(free["total"], 219)  # + 3 smoke
         old = {"model": runner.HAIKU, "rubric": "v1"}  # the pre-J4 HARM judge: all Haiku
-        self.assertEqual(selftest.plan_calls("free", 12, old)["by_model"], {"meituan/longcat-2.5:free": 75, "claude-haiku-5-5": 144})
-        self.assertEqual(selftest.plan_calls("a1", 12, old)["by_model"], {"claude-haiku-5-5": 216})
+        self.assertEqual(selftest.plan_calls("free", 12, old)["by_model"], {selftest.FREE_MODEL: 75, runner.HAIKU: 144})
+        self.assertEqual(selftest.plan_calls("a1", 12, old)["by_model"], {runner.HAIKU: 216})
         # Frozen J4 judge: HARM calls move to the configured model; totals unchanged.
         by = a1["by_model"]
         self.assertEqual(sum(by.values()), 216)
@@ -166,7 +166,7 @@ class LabelTests(unittest.TestCase):
         self.assertIsNotNone(agg["bloat_overhead"])
         md = selftest.render_md({"runs": {"a1": a1, "a2": a2}, "aggregate": agg})
         self.assertIn("Proof it works", md)
-        self.assertIn("claude-haiku-5-5", md)
+        self.assertIn(runner.HAIKU, md)
 
     def test_aa_bar_comes_from_own_aa_cell(self):
         # HARM judge flags Answer 1 whenever it is a real convention answer: helpful gets judge harm.
@@ -204,9 +204,9 @@ class FreeTierTests(unittest.TestCase):
     def test_trust_gate(self):
         self.assertTrue(selftest.free_tier_allowed(TRUST_OK)[0])
         self.assertFalse(selftest.free_tier_allowed(None)[0])
-        no_model = {**TRUST_OK, "allowed_models": ["claude-haiku-5-5"]}
+        no_model = {**TRUST_OK, "allowed_models": [runner.HAIKU]}
         self.assertFalse(selftest.free_tier_allowed(no_model)[0])
-        no_nous = {**TRUST_OK, "allowed_providers": ["claude-subscription-directsdk-experimental"]}
+        no_nous = {**TRUST_OK, "allowed_providers": [runner.SUB_PROVIDER]}
         self.assertFalse(selftest.free_tier_allowed(no_nous)[0])
         self.assertFalse(selftest.free_tier_allowed({**TRUST_OK, "allow_model_override": False})[0])
 
@@ -238,7 +238,7 @@ class FreeTierTests(unittest.TestCase):
 
     def test_record_skip_from_logged_smoke(self):
         row = {"index": 1, "ts": "t", "run": "free", "purpose": "free smoke 1", "role": "smoke", "cell": "smoke",
-               "attempt": 1, "requested_provider": "nous", "requested_model": selftest.FREE_MODEL, "provider": "nous",
+               "attempt": 1, "requested_provider": selftest.FREE_PROVIDER, "requested_model": selftest.FREE_MODEL, "provider": selftest.FREE_PROVIDER,
                "model": "claude-opus-5-5[1m]", "input_tokens": 555, "output_tokens": 4, "total_tokens": 559,
                "cache_read_tokens": 0, "latency_s": 381.1, "ok": False, "error_type": "ModelMismatch",
                "error": "requested nous/x but the host routed the call to 'claude-opus-5-5[1m]'", "text_chars": 2}
@@ -256,7 +256,7 @@ class FreeTierTests(unittest.TestCase):
         self.assertIsNone(out["stopped_early"])
         subj = [kw for m, kw in llm.calls if m[0]["content"] not in (RUBRIC_JOB, RUBRIC_HARM)]
         judges = [kw for m, kw in llm.calls if m[0]["content"] in (RUBRIC_JOB, RUBRIC_HARM)]
-        self.assertTrue(all(kw["provider"] == "nous" and kw["model"] == selftest.FREE_MODEL for kw in subj))
+        self.assertTrue(all(kw["provider"] == selftest.FREE_PROVIDER and kw["model"] == selftest.FREE_MODEL for kw in subj))
         self.assertTrue(all(kw["provider"] == runner.SUB_PROVIDER and kw["model"] in (runner.HAIKU, HARM_CFG["model"])
                             for kw in judges))
         self.assertLessEqual(out["free_tier"]["counts"]["max_in_flight_seen"], selftest.FREE_MAX_IN_FLIGHT)

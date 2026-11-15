@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import json
+import os
 import re
 import threading
 import time
@@ -39,10 +40,26 @@ from . import stats
 
 HARD_CAP = 300
 SKILL_NAME = "tallowgate-ledger"
-#: Used only by the private dev harness; product runs use your active provider.
-SUB_PROVIDER = "claude-subscription-directsdk-experimental"
-HAIKU = "claude-haiku-5-5"
-OPUS = "claude-opus-5-5"
+
+#: Dev-harness pins (self-test runs a1, a2 and free, and the private tools). They come from the
+#: environment and have no defaults, so shipped code names no provider or model of its own. Product
+#: runs never read them: they use your active provider and model, or the routes you set.
+DEV_ENV_PREFIX = "SKILLUMINATI_DEV_"
+
+
+def dev_pin(name: str) -> str:
+    """``$SKILLUMINATI_DEV_<name>``, stripped; empty when unset."""
+    return os.environ.get(DEV_ENV_PREFIX + name, "").strip()
+
+
+SUB_PROVIDER = dev_pin("PROVIDER")  # the provider every dev-run call goes to
+HAIKU = dev_pin("MODEL")  # the dev subject and JOB judge model
+OPUS = dev_pin("LARGE_MODEL")  # the second dev subject (runner.RunConfig only)
+
+
+def dev_pins_missing(names: tuple[str, ...] = ("PROVIDER", "MODEL")) -> list[str]:
+    """The ``SKILLUMINATI_DEV_*`` variables a dev run needs that are not set."""
+    return [DEV_ENV_PREFIX + n for n in names if not dev_pin(n)]
 
 #: Three decoy index rows so the planted skill is one entry among several, as in a real index.
 DECOYS = (
@@ -531,7 +548,7 @@ def compute_gate(results: dict[str, Any]) -> dict[str, bool]:
 
 
 __all__ = [
-    "HARD_CAP", "SKILL_NAME", "SUB_PROVIDER", "HAIKU", "OPUS", "DECOYS", "USAGE_LIMIT_RE", "JUDGE_MODE_NEW_RUNS",
+    "HARD_CAP", "SKILL_NAME", "SUB_PROVIDER", "HAIKU", "OPUS", "DEV_ENV_PREFIX", "dev_pin", "dev_pins_missing", "DECOYS", "USAGE_LIMIT_RE", "JUDGE_MODE_NEW_RUNS",
     "CapExceeded", "UsageLimit", "Budget", "RunConfig", "Runner",
     "build_system_prompt", "load_tasks", "load_checks", "load_skill", "task_outcome", "plan_calls",
     "estimate_tokens", "summarise_cell", "summarise_aa", "position_bias_summary", "totals", "compute_gate",

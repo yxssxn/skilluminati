@@ -243,7 +243,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_model_mismatch_is_failed_call_not_result(self):
         with tempfile.TemporaryDirectory() as d:
-            fake = FakeLlm(subject_fn=subject_follows_skill, model_map={"claude-opus-5-5": "claude-fable-5-1"})
+            fake = FakeLlm(subject_fn=subject_follows_skill, model_map={runner.OPUS: "claude-fable-5-1"})
             res = runner.Runner(fake, _cfg(d, task_ids=[TASKS[0]["id"]]), log=lambda s: None).run()
             self.assertEqual(res["cells"]["helpful/opus"]["n_errors"], 1)
             self.assertEqual(res["cells"]["helpful/haiku"]["n_errors"], 0)

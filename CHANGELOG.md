@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.1 (15 Nov 2026)
+
+- A run cut off by a Hermes restart is now closed on the next start or `/skilluminati last`: its progress log ends with "Interrupted: Hermes stopped during this run" and a NOTE.txt says nothing was saved. Pools and saved verdicts are not touched.
+- "Why it lost" shows the Owl's reasons as plain text: HTML, markdown and control characters are taken out, and long reasons are cut at a word, ending in "...". This applies to the report, the chat, the page and the result tool.
+- The judge guide says a judge model must be on `plugins.entries.skilluminati.llm.allowed_models` if you keep that list, or Hermes refuses the call (`PluginLlmTrustError`).
+- The plugin no longer names the author's own provider or models. The developer self-test runs read them from `SKILLUMINATI_DEV_*` settings; the quick and full self-tests are unchanged.
+
 ## v0.2.0 (14 Nov 2026)
 
 Install with `hermes plugins install yxssxn/skilluminati/plugin`. The catalogue still installs v0.1.0.

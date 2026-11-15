@@ -188,7 +188,7 @@ function Working({ r, c }) {
   if (r.pool_line) lines.push(`${str(r.pool_line)}.`) // F01: "12 tasks, 3 runs" (wording from copy.py)
   // F03: worked out by the backend each load (skill file or model changed since this test).
   for (const t of Array.isArray(r.show_flags) ? r.show_flags : []) lines.push(str(t))
-  if (w.tool_driven) lines.push(str(c.working_tool_driven))
+  if (w.tool_driven) lines.push(str(c.tool_driven_tip)) // same sentence as the row tag's tip
   // F12: the judge's own reasons where the skill lost. Plain strings rendered as text children (React
   // escapes them), never as markup.
   const lost = (Array.isArray(w.lost_reasons) ? w.lost_reasons : []).map((t) => str(t)).filter(Boolean)

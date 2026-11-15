@@ -44,7 +44,10 @@ def _verdict_result(**extra):
 class VersionStamp(unittest.TestCase):
     def test_stamp_reads_plugin_yaml_and_hashes_the_code(self):
         st = paths.version_stamp()
-        self.assertEqual(st["plugin_version"], "0.2.0")
+        self.assertEqual(st["plugin_version"], importlib.import_module("plugin.skilluminati").__version__)
+        manifest = json.loads((PLUGIN / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], st["plugin_version"])
+        self.assertEqual(st["plugin_version"], "0.2.1")
         self.assertRegex(st["code_fingerprint"], r"^[0-9a-f]{12}$")
         self.assertEqual(st["code_fingerprint"], _expected(PLUGIN))
 

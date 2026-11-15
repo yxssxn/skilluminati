@@ -223,6 +223,39 @@ LOST_REASON_MAX = 160
 LOST_REASONS_SHOWN = 3
 
 
+_TAG_RE = re.compile(r"<[^<>]*>")
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_MARK_RE = re.compile(r"\*\*|__|~~|`+|(?<![\w*])\*|\*(?![\w*])|(?<!\w)_(?=\w)|(?<=\w)_(?!\w)")
+_MD_LINE_RE = re.compile(r"(?m)^\s*(?:#{1,6}|>+|[-+*]|\d+[.)])\s+")
+
+
+def clean_reason(text: str, limit: Optional[int] = None) -> str:
+    """One judge reason made safe to quote: entities decoded, HTML tags, markdown markup, table
+    bars, angle brackets and control or format characters removed, spaces collapsed, then cut to
+    ``limit`` (``LOST_REASON_MAX``) characters at a word boundary with "...". Display only."""
+    import html
+    import unicodedata
+    limit = LOST_REASON_MAX if limit is None else limit
+    t = html.unescape(str(text))
+    t = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") and ch != "\n" else ch for ch in t)
+    t = re.sub(r"\[[0-9;]*m", " ", t)  # what is left of a terminal colour code once ESC is gone
+    t = _MD_LINE_RE.sub(" ", t)
+    t = _TAG_RE.sub("", t)
+    t = _MD_IMAGE_RE.sub(r"\1", t)
+    t = _MD_LINK_RE.sub(r"\1", t)
+    t = _MD_MARK_RE.sub("", t)
+    t = re.sub(r"[<>|]", " ", t)
+    t = " ".join(t.split())
+    t = re.sub(r"\s+([.,;:!?])", r"\1", t)
+    if len(t) <= limit:
+        return t
+    room = max(1, limit - 3)
+    cut = t[:room + 1].rsplit(" ", 1)[0] if " " in t[:room + 1] else ""
+    cut = cut.rstrip(" .,;:") if 0 < len(cut) <= room else t[:room]
+    return cut + "..."
+
+
 def _order_reason(order: Any) -> Optional[str]:
     """The ``reason`` from one judge order's stored text (one JSON object), else None."""
     text = order.get("text") if isinstance(order, Mapping) else None
@@ -320,11 +353,12 @@ def lost_reasons(run_dir: Optional[Path], skill: str, limit: int = LOST_REASONS_
                     continue
                 for order in j.get("orders") or []:
                     r = _order_reason(order)
+                    r = clean_reason(r, limit=10 ** 6) if r else r  # model text: no markup, no control chars
                     r = shown_reason(r, order.get("first")) if r else r  # W2-Q1: roles, not positions
                     if r and (p["task_hash"] not in best or len(r) < len(best[p["task_hash"]])):
                         best[p["task_hash"]] = r
         shown = sorted(dict.fromkeys(best.values()), key=lambda r: (len(r), r))[:max(0, limit)]
-        return [r if len(r) <= LOST_REASON_MAX else r[:LOST_REASON_MAX - 3].rstrip() + "..." for r in shown]
+        return [clean_reason(r) for r in shown]
     except Exception:
         return []
 
@@ -554,7 +588,7 @@ def selftest_plain(f: Mapping[str, Any]) -> str:
 # ── entry points ─────────────────────────────────────────────────────────────
 
 def version_line(result: Mapping[str, Any]) -> Optional[str]:
-    """W2 1: "Skilluminati 0.2.0 (code abc123def456)" from the stamp in result.json; None on
+    """W2 1: "Skilluminati 0.2.1 (code abc123def456)" from the stamp in result.json; None on
     results saved before the stamp."""
     v, code = result.get("plugin_version"), result.get("code_fingerprint")
     if not (isinstance(v, str) and v and isinstance(code, str) and code):
@@ -639,6 +673,8 @@ def saved_or_built(run_dir: Path) -> Optional[str]:
             text = p.read_text(encoding="utf-8").strip()
             if text:
                 live = build(run_dir, live=True)
+                if live is not None and sb_copy.LOST_LABEL in text:
+                    return live  # a saved report may quote older, uncleaned judge reasons
                 return live if live is not None and live != build(run_dir) else text
     except OSError:
         pass
@@ -878,7 +914,64 @@ def running(runs_dir: Optional[Path] = None, now: Optional[float] = None) -> Opt
     return None
 
 
-__all__ = ["REPORT_FILE", "CAVEAT", "plural", "real_model", "finished_runs", "find_run", "load_result",
+NOTE_FILE = "NOTE.txt"
+
+
+def _live_info(root: Path, now: float) -> Optional[Mapping[str, Any]]:
+    """``live.json`` when it is fresh (a run is going in some process), else None."""
+    try:
+        live = json.loads((root.parent / "live.json").read_text(encoding="utf-8"))
+        if isinstance(live, Mapping) and now - float(live.get("updated") or 0) < LIVE_STALE_S:
+            return live
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _is_live_folder(name: str, live: Optional[Mapping[str, Any]]) -> bool:
+    if live is None:
+        return False
+    if str(live.get("kind") or "") == "selftest":
+        return run_kind(name) == "selftest"
+    return run_kind(name) == "verdict" and (run_skill(name) or "") == sb_paths.safe_name(str(live.get("skill") or ""))
+
+
+def mark_interrupted(runs_dir: Optional[Path] = None, now: Optional[float] = None) -> list[Path]:
+    """Close run folders a Hermes restart cut off: no ``result.json``, no ``[stop]`` line in
+    ``progress.log``, no file written for ``RUNNING_STALE_S``, and not the run ``live.json`` says is
+    going. Adds one ``[stop]`` line and a ``NOTE.txt`` (0600). Only touches run folders; idempotent
+    (the ``[stop]`` line it adds is what makes a second pass skip the folder). Never raises."""
+    from . import copy as sb_copy
+    root = runs_dir or sb_paths.runs_dir()
+    now = time.time() if now is None else now
+    out: list[Path] = []
+    try:
+        dirs = [d for d in root.iterdir() if d.is_dir() and (run_skill(d.name) or "-selftest-" in d.name)]
+    except OSError:
+        return out
+    live = _live_info(root, now)
+    for d in sorted(dirs, key=lambda p: p.name):
+        try:
+            log = d / "progress.log"
+            if (d / RESULT_FILE).exists() or not log.is_file() or _is_live_folder(d.name, live):
+                continue
+            stamps = [f.stat().st_mtime for f in d.iterdir() if f.is_file()]
+            if not stamps or now - max(stamps) <= RUNNING_STALE_S:
+                continue
+            text = log.read_text(encoding="utf-8", errors="replace")
+            if any(line.startswith("[stop]") for line in text.splitlines()):
+                continue
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(("" if not text or text.endswith("\n") else "\n") + sb_copy.INTERRUPTED_STOP + "\n")
+            note = sb_paths.private_file(d / NOTE_FILE)
+            note.write_text(sb_copy.INTERRUPTED_NOTE + "\n", encoding="utf-8")
+            out.append(d)
+        except OSError:
+            continue
+    return out
+
+
+__all__ = ["REPORT_FILE", "mark_interrupted", "CAVEAT", "plural", "real_model", "finished_runs", "find_run", "load_result",
            "models_from_calls", "next_step_text", "build", "version_line", "headline", "save", "saved_or_built", "terminal",
-           "run_kind", "run_skill", "lost_reasons", "VERDICT_KEYS", "verdict_key", "verdict_strength", "working",
+           "run_kind", "run_skill", "lost_reasons", "clean_reason", "VERDICT_KEYS", "verdict_key", "verdict_strength", "working",
            "page_result", "running"]
